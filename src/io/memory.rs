@@ -7,8 +7,9 @@ use crate::error::AppShotsError;
 use crate::io::FileStore;
 
 /// In-memory `FileStore` for unit tests.
+/// Tracks file content and modification times for realistic caching behavior.
 pub struct MemoryStore {
-    files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+    files: Mutex<HashMap<PathBuf, (Vec<u8>, SystemTime)>>,
 }
 
 impl MemoryStore {
@@ -31,7 +32,7 @@ impl FileStore for MemoryStore {
             .files
             .lock()
             .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
-        let bytes = files.get(path).ok_or_else(|| AppShotsError::FileNotFound {
+        let (bytes, _) = files.get(path).ok_or_else(|| AppShotsError::FileNotFound {
             path: path.to_path_buf(),
         })?;
         String::from_utf8(bytes.clone())
@@ -45,7 +46,7 @@ impl FileStore for MemoryStore {
             .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
         files
             .get(path)
-            .cloned() // clone the Vec<u8> out of the map
+            .map(|(bytes, _)| bytes.clone())
             .ok_or_else(|| AppShotsError::FileNotFound {
                 path: path.to_path_buf(),
             })
@@ -56,7 +57,10 @@ impl FileStore for MemoryStore {
             .files
             .lock()
             .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
-        files.insert(path.to_path_buf(), content.as_bytes().to_vec());
+        files.insert(
+            path.to_path_buf(),
+            (content.as_bytes().to_vec(), SystemTime::now()),
+        );
         Ok(())
     }
 
@@ -65,7 +69,7 @@ impl FileStore for MemoryStore {
             .files
             .lock()
             .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
-        files.insert(path.to_path_buf(), content.to_vec());
+        files.insert(path.to_path_buf(), (content.to_vec(), SystemTime::now()));
         Ok(())
     }
 
@@ -74,13 +78,12 @@ impl FileStore for MemoryStore {
             .files
             .lock()
             .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
-        if files.contains_key(path) {
-            Ok(SystemTime::now())
-        } else {
-            Err(AppShotsError::FileNotFound {
+        files
+            .get(path)
+            .map(|(_, mtime)| *mtime)
+            .ok_or_else(|| AppShotsError::FileNotFound {
                 path: path.to_path_buf(),
             })
-        }
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -99,24 +102,26 @@ impl FileStore for MemoryStore {
             .files
             .lock()
             .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
-        let mut result: Vec<PathBuf> = files
-            .keys()
-            .filter(|k| {
-                // Immediate children: parent matches the given path
-                k.parent() == Some(path)
-            })
-            .cloned()
-            .collect();
-        if result.is_empty() {
-            // Check if any file has this as an ancestor (dir exists but empty at
-            // this level is fine). If nothing starts with this prefix at all,
-            // treat as not found.
-            let has_any = files.keys().any(|k| k.starts_with(path));
-            if !has_any {
-                return Err(AppShotsError::FileNotFound {
-                    path: path.to_path_buf(),
-                });
+
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+
+        for k in files.keys() {
+            if let Ok(rel) = k.strip_prefix(path) {
+                // Get the first component (immediate child — file or virtual dir)
+                if let Some(first) = rel.components().next() {
+                    let child = path.join(first);
+                    if seen.insert(child.clone()) {
+                        result.push(child);
+                    }
+                }
             }
+        }
+
+        if result.is_empty() {
+            return Err(AppShotsError::FileNotFound {
+                path: path.to_path_buf(),
+            });
         }
         result.sort();
         Ok(result)
@@ -174,7 +179,8 @@ mod tests {
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
-        assert_eq!(names, vec!["a.txt", "b.txt"]);
+        // Returns immediate files and virtual subdirectories
+        assert_eq!(names, vec!["a.txt", "b.txt", "sub"]);
     }
 
     #[test]

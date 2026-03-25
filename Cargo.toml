@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 rmcp = { version = "1.2", features = ["server", "transport-io", "macros"] }
-tokio = { version = "1", features = ["rt", "macros", "io-std"] }
+tokio = { version = "1", features = ["rt", "macros", "io-std", "sync", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 indexmap = { version = "2", features = ["serde"] }
