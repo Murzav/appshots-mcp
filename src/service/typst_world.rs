@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use typst::foundations::{Bytes, Datetime, Dict};
 use typst::layout::PagedDocument;
@@ -9,6 +10,21 @@ use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
 use crate::error::AppShotsError;
+
+/// Cached bundled fonts — parsed once, reused across all renders.
+fn bundled_fonts() -> &'static [Font] {
+    static FONTS: OnceLock<Vec<Font>> = OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut fonts = Vec::new();
+        for data in typst_assets::fonts() {
+            let bytes = Bytes::new(data);
+            for font in Font::iter(bytes) {
+                fonts.push(font);
+            }
+        }
+        fonts
+    })
+}
 
 /// Minimal Typst World for rendering screenshot templates.
 ///
@@ -35,14 +51,8 @@ impl AppWorld {
         extra_fonts: Vec<Vec<u8>>,
         files: HashMap<String, Vec<u8>>,
     ) -> Self {
-        // Load bundled fonts from typst_assets
-        let mut fonts = Vec::new();
-        for data in typst_assets::fonts() {
-            let bytes = Bytes::new(data);
-            for font in Font::iter(bytes) {
-                fonts.push(font);
-            }
-        }
+        // Start with cached bundled fonts (parsed once, shared across renders)
+        let mut fonts: Vec<Font> = bundled_fonts().to_vec();
 
         // Add extra fonts
         for font_data in extra_fonts {

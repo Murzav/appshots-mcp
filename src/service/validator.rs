@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
 use typst::diag::Severity;
-use typst::foundations::{Dict, IntoValue, Str};
 use typst::layout::PagedDocument;
 
-use crate::service::locale::text_direction;
-use crate::service::typst_renderer::RenderParams;
+use crate::service::typst_renderer::{RenderParams, build_inputs};
 use crate::service::typst_world::AppWorld;
 
 /// Severity of a validation issue.
@@ -20,69 +18,6 @@ pub enum IssueSeverity {
 pub struct ValidationIssue {
     pub severity: IssueSeverity,
     pub message: String,
-}
-
-/// Build sys.inputs from RenderParams (same logic as typst_renderer).
-fn build_inputs(params: &RenderParams) -> Dict {
-    let mut inputs = Dict::new();
-
-    inputs.insert(
-        "caption_title".into(),
-        Str::from(params.caption_title.as_str()).into_value(),
-    );
-
-    if let Some(ref subtitle) = params.caption_subtitle {
-        inputs.insert(
-            "caption_subtitle".into(),
-            Str::from(subtitle.as_str()).into_value(),
-        );
-    }
-
-    if let Some(ref keyword) = params.keyword {
-        inputs.insert("keyword".into(), Str::from(keyword.as_str()).into_value());
-    }
-
-    if let Some(first) = params.bg_colors.first() {
-        inputs.insert(
-            "bg_color".into(),
-            Str::from(first.to_typst().as_str()).into_value(),
-        );
-    }
-
-    if !params.bg_colors.is_empty() {
-        let gradient: String = params
-            .bg_colors
-            .iter()
-            .map(|c| c.to_typst())
-            .collect::<Vec<_>>()
-            .join(", ");
-        inputs.insert(
-            "bg_gradient".into(),
-            Str::from(gradient.as_str()).into_value(),
-        );
-    }
-
-    let (w, h) = params.device.canvas_size();
-    inputs.insert(
-        "device_width".into(),
-        Str::from(w.to_string().as_str()).into_value(),
-    );
-    inputs.insert(
-        "device_height".into(),
-        Str::from(h.to_string().as_str()).into_value(),
-    );
-
-    inputs.insert(
-        "locale".into(),
-        Str::from(params.locale.code()).into_value(),
-    );
-
-    inputs.insert(
-        "text_direction".into(),
-        Str::from(text_direction(&params.locale)).into_value(),
-    );
-
-    inputs
 }
 
 /// Validate a template by compiling it and checking for warnings/errors.
@@ -131,9 +66,11 @@ mod tests {
     use crate::model::locale::AsoLocale;
     use crate::service::typst_renderer::RenderParams;
 
+    use crate::model::color::OklchColor;
+
     fn test_params() -> RenderParams {
         RenderParams {
-            template_source: String::new(), // not used by validate_layout directly
+            template_source: String::new(),
             caption_title: "Test".to_owned(),
             caption_subtitle: None,
             keyword: None,
@@ -141,6 +78,33 @@ mod tests {
             device: Device::Iphone6_9,
             locale: AsoLocale::EnUs,
             screenshot_data: None,
+            extra_fonts: vec![],
+        }
+    }
+
+    fn full_params() -> RenderParams {
+        RenderParams {
+            template_source: String::new(),
+            caption_title: "Track Your Glucose".to_owned(),
+            caption_subtitle: Some("Monitor daily trends".to_owned()),
+            keyword: Some("glucose tracker".to_owned()),
+            bg_colors: vec![
+                OklchColor {
+                    l: 50.0,
+                    c: 0.15,
+                    h: 240.0,
+                    alpha: 1.0,
+                },
+                OklchColor {
+                    l: 30.0,
+                    c: 0.1,
+                    h: 270.0,
+                    alpha: 0.8,
+                },
+            ],
+            device: Device::Ipad13,
+            locale: AsoLocale::ArSa,
+            screenshot_data: Some(vec![0x89, 0x50, 0x4E, 0x47]),
             extra_fonts: vec![],
         }
     }
@@ -168,19 +132,77 @@ Hello World"#,
     }
 
     #[test]
-    fn template_with_warning_produces_warning_issue() {
-        // Typst warns about unused variables in some cases, but the easiest
-        // way to trigger a warning is to rely on layout convergence issues.
-        // Instead, we test that a valid but somewhat suspicious template
-        // at least doesn't crash the validator.
+    fn validate_with_full_params_exercises_all_inputs() {
+        let params = full_params();
+        let template = r#"
+#set page(width: 688pt, height: 917pt, margin: 20pt)
+#let title = sys.inputs.at("caption_title")
+#let subtitle = sys.inputs.at("caption_subtitle", default: "")
+#let kw = sys.inputs.at("keyword", default: "")
+#let bg = sys.inputs.at("bg_color", default: "white")
+#let grad = sys.inputs.at("bg_gradient", default: "")
+#let dw = sys.inputs.at("device_width")
+#let dh = sys.inputs.at("device_height")
+#let loc = sys.inputs.at("locale")
+#let dir = sys.inputs.at("text_direction")
+#title \ #subtitle \ #kw \ #bg \ #dw × #dh \ #loc (#dir)
+"#;
+        let issues = validate_layout(template, &params);
+        let errors: Vec<_> = issues
+            .iter()
+            .filter(|i| i.severity == IssueSeverity::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn validate_with_rtl_locale() {
+        let params = full_params(); // ArSa locale
+        let template = r#"
+#set page(width: 688pt, height: 917pt, margin: 20pt)
+#let dir = sys.inputs.at("text_direction")
+Direction: #dir
+"#;
+        let issues = validate_layout(template, &params);
+        let errors: Vec<_> = issues
+            .iter()
+            .filter(|i| i.severity == IssueSeverity::Error)
+            .collect();
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn validate_error_contains_message() {
+        let params = test_params();
+        let issues = validate_layout("#unknown_func()", &params);
+        assert!(!issues.is_empty());
+        let error = &issues[0];
+        assert_eq!(error.severity, IssueSeverity::Error);
+        assert!(
+            !error.message.is_empty(),
+            "error message should not be empty"
+        );
+    }
+
+    #[test]
+    fn validate_no_warnings_on_clean_template() {
         let params = test_params();
         let issues = validate_layout(
             r#"#set page(width: 440pt, height: 956pt, margin: 0pt)
-Valid template with no warnings"#,
+Clean template"#,
             &params,
         );
-        // This template shouldn't produce warnings
-        let has_errors = issues.iter().any(|i| i.severity == IssueSeverity::Error);
-        assert!(!has_errors, "unexpected errors: {issues:?}");
+        let warnings: Vec<_> = issues
+            .iter()
+            .filter(|i| i.severity == IssueSeverity::Warning)
+            .collect();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn issue_severity_equality() {
+        assert_eq!(IssueSeverity::Error, IssueSeverity::Error);
+        assert_eq!(IssueSeverity::Warning, IssueSeverity::Warning);
+        assert_ne!(IssueSeverity::Error, IssueSeverity::Warning);
     }
 }

@@ -31,7 +31,7 @@ pub struct RenderResult {
 }
 
 /// Build the `sys.inputs` dictionary from render params.
-fn build_inputs(params: &RenderParams) -> Dict {
+pub(crate) fn build_inputs(params: &RenderParams) -> Dict {
     let mut inputs = Dict::new();
 
     inputs.insert(
