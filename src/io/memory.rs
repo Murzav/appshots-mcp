@@ -1,0 +1,189 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
+
+use crate::error::AppShotsError;
+use crate::io::FileStore;
+
+/// In-memory `FileStore` for unit tests.
+pub struct MemoryStore {
+    files: Mutex<HashMap<PathBuf, Vec<u8>>>,
+}
+
+impl MemoryStore {
+    pub fn new() -> Self {
+        Self {
+            files: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileStore for MemoryStore {
+    fn read(&self, path: &Path) -> Result<String, AppShotsError> {
+        let files = self
+            .files
+            .lock()
+            .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
+        let bytes = files.get(path).ok_or_else(|| AppShotsError::FileNotFound {
+            path: path.to_path_buf(),
+        })?;
+        String::from_utf8(bytes.clone())
+            .map_err(|e| AppShotsError::InvalidFormat(format!("invalid UTF-8: {e}")))
+    }
+
+    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AppShotsError> {
+        let files = self
+            .files
+            .lock()
+            .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
+        files
+            .get(path)
+            .cloned() // clone the Vec<u8> out of the map
+            .ok_or_else(|| AppShotsError::FileNotFound {
+                path: path.to_path_buf(),
+            })
+    }
+
+    fn write(&self, path: &Path, content: &str) -> Result<(), AppShotsError> {
+        let mut files = self
+            .files
+            .lock()
+            .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
+        files.insert(path.to_path_buf(), content.as_bytes().to_vec());
+        Ok(())
+    }
+
+    fn write_bytes(&self, path: &Path, content: &[u8]) -> Result<(), AppShotsError> {
+        let mut files = self
+            .files
+            .lock()
+            .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
+        files.insert(path.to_path_buf(), content.to_vec());
+        Ok(())
+    }
+
+    fn modified_time(&self, path: &Path) -> Result<SystemTime, AppShotsError> {
+        let files = self
+            .files
+            .lock()
+            .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
+        if files.contains_key(path) {
+            Ok(SystemTime::now())
+        } else {
+            Err(AppShotsError::FileNotFound {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.files
+            .lock()
+            .map(|files| files.contains_key(path))
+            .unwrap_or(false)
+    }
+
+    fn create_parent_dirs(&self, _path: &Path) -> Result<(), AppShotsError> {
+        Ok(()) // no-op for in-memory store
+    }
+
+    fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, AppShotsError> {
+        let files = self
+            .files
+            .lock()
+            .map_err(|e| AppShotsError::InvalidFormat(format!("lock poisoned: {e}")))?;
+        let mut result: Vec<PathBuf> = files
+            .keys()
+            .filter(|k| {
+                // Immediate children: parent matches the given path
+                k.parent() == Some(path)
+            })
+            .cloned()
+            .collect();
+        if result.is_empty() {
+            // Check if any file has this as an ancestor (dir exists but empty at
+            // this level is fine). If nothing starts with this prefix at all,
+            // treat as not found.
+            let has_any = files.keys().any(|k| k.starts_with(path));
+            if !has_any {
+                return Err(AppShotsError::FileNotFound {
+                    path: path.to_path_buf(),
+                });
+            }
+        }
+        result.sort();
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_write_roundtrip() {
+        let store = MemoryStore::new();
+        let path = Path::new("/test/hello.txt");
+        store.write(path, "hello world").expect("write");
+        let content = store.read(path).expect("read");
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn file_not_found() {
+        let store = MemoryStore::new();
+        let err = store.read(Path::new("/missing")).expect_err("should fail");
+        assert!(matches!(err, AppShotsError::FileNotFound { .. }));
+    }
+
+    #[test]
+    fn exists_works() {
+        let store = MemoryStore::new();
+        let path = Path::new("/test/exists.txt");
+        assert!(!store.exists(path));
+        store.write(path, "data").expect("write");
+        assert!(store.exists(path));
+    }
+
+    #[test]
+    fn list_dir_empty_and_populated() {
+        let store = MemoryStore::new();
+        let dir = Path::new("/mydir");
+
+        // Not found when nothing exists
+        let err = store.list_dir(dir).expect_err("should fail");
+        assert!(matches!(err, AppShotsError::FileNotFound { .. }));
+
+        // Add files
+        store.write(Path::new("/mydir/b.txt"), "b").expect("write");
+        store.write(Path::new("/mydir/a.txt"), "a").expect("write");
+        // File in subdirectory should not appear
+        store
+            .write(Path::new("/mydir/sub/c.txt"), "c")
+            .expect("write");
+
+        let entries = store.list_dir(dir).expect("list_dir");
+        let names: Vec<_> = entries
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert_eq!(names, vec!["a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn write_bytes_roundtrip() {
+        let store = MemoryStore::new();
+        let path = Path::new("/test/data.bin");
+        let data = vec![0u8, 1, 2, 255, 128];
+        store.write_bytes(path, &data).expect("write_bytes");
+        let result = store.read_bytes(path).expect("read_bytes");
+        assert_eq!(result, data);
+    }
+}
