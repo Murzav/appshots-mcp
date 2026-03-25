@@ -42,19 +42,19 @@ pub(crate) async fn handle_validate_layout(
             reason: "non-UTF-8 path".into(),
         })?;
 
-    // Determine which locales to validate
+    // Determine which locales to validate (None = all 39 ASO locales)
     let target_locales: Vec<AsoLocale> = match locales {
         Some(codes) => codes
             .iter()
             .map(|c| AsoLocale::from_str(c))
             .collect::<Result<Vec<_>, _>>()?,
-        None => vec![AsoLocale::EnUs], // default to en-US for validation
+        None => crate::model::locale::ALL.to_vec(),
     };
 
-    // Determine which modes to validate
+    // Determine which modes to validate (None = all modes 1..=10)
     let target_modes: Vec<u8> = match modes {
         Some(m) => m.to_vec(),
-        None => vec![1], // default to mode 1
+        None => (1..=10).collect(),
     };
 
     let devices = device::REQUIRED;

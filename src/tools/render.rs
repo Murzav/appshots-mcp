@@ -30,25 +30,19 @@ pub struct ScreenshotInfo {
     pub height: u32,
 }
 
-/// Load captions for a locale from `fastlane/metadata/{locale}/captions.json`.
-fn load_captions(
-    store: &dyn FileStore,
-    project_dir: &Path,
+/// Load captions for a locale from the project config's `extra["captions"][locale]`.
+/// This is where `save_captions` stores them.
+fn load_captions_from_config(
+    config: &crate::model::config::ProjectConfig,
     locale: &AsoLocale,
-) -> Result<Vec<Caption>, AppShotsError> {
-    let captions_path = project_dir
-        .join("fastlane/metadata")
-        .join(locale.code())
-        .join("captions.json");
-
-    if !store.exists(&captions_path) {
-        return Ok(vec![]);
-    }
-
-    let raw = store.read(&captions_path)?;
-    let captions: Vec<Caption> =
-        serde_json::from_str(&raw).map_err(|e| AppShotsError::JsonParse(e.to_string()))?;
-    Ok(captions)
+) -> Vec<Caption> {
+    let Some(captions_val) = config.extra.get("captions") else {
+        return vec![];
+    };
+    let Some(locale_val) = captions_val.get(locale.code()) else {
+        return vec![];
+    };
+    serde_json::from_value::<Vec<Caption>>(locale_val.clone()).unwrap_or_default()
 }
 
 /// Compose final screenshots via Typst rendering.
@@ -82,13 +76,22 @@ pub(crate) async fn handle_compose_screenshots(
         }
     };
 
-    // Determine target locales
+    // Determine target locales (None = all from scanned metadata)
     let target_locales: Vec<AsoLocale> = match locales {
         Some(ref codes) => codes
             .iter()
             .map(|c| AsoLocale::from_str(c))
             .collect::<Result<Vec<_>, _>>()?,
-        None => vec![AsoLocale::EnUs],
+        None => {
+            let guard = cache.lock().await;
+            let mut all: Vec<AsoLocale> = guard.metadata.keys().copied().collect();
+            all.sort_by(|a, b| a.code().cmp(b.code()));
+            if all.is_empty() {
+                vec![AsoLocale::EnUs] // fallback if no scan was done
+            } else {
+                all
+            }
+        }
     };
 
     // Determine devices from config
@@ -102,7 +105,7 @@ pub(crate) async fn handle_compose_screenshots(
     let mut screenshots = Vec::new();
 
     for &locale in &target_locales {
-        let captions = load_captions(store, project_dir, &locale)?;
+        let captions = load_captions_from_config(&config, &locale);
 
         for &mode in &target_modes {
             // Resolve template
@@ -238,22 +241,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compose_with_captions() {
+    async fn compose_with_captions_from_config() {
         let store = MemoryStore::new();
         let project_dir = PathBuf::from("/project");
-        setup_store(&store, &project_dir);
 
-        // Add captions
-        let captions_path = project_dir.join("fastlane/metadata/en-US/captions.json");
-        store
-            .write(
-                &captions_path,
-                r#"[{"mode": 1, "title": "Track Easily", "subtitle": "With one tap"}]"#,
-            )
-            .unwrap();
+        // Config with embedded captions
+        let config_with_captions = r#"{
+            "bundleId": "com.example.app",
+            "screens": [{"mode": 1, "name": "Dashboard"}],
+            "templateMode": "single",
+            "devices": [],
+            "captions": {
+                "en-US": [{"mode": 1, "title": "Track Easily", "subtitle": "With one tap"}]
+            }
+        }"#;
+        let config_path = project_dir.join("appshots.json");
+        store.write(&config_path, config_with_captions).unwrap();
+
+        // Template
+        let template_path = project_dir.join("appshots/template.typ");
+        store.write(&template_path, MINIMAL_TEMPLATE).unwrap();
 
         let cache = Mutex::new(ProjectCache::new());
-        let config_path = project_dir.join("appshots.json");
 
         let result = handle_compose_screenshots(
             &store,
@@ -266,7 +275,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.rendered, 1);
+        // 1 mode × 1 locale × 2 devices (REQUIRED) = 2 screenshots
+        assert_eq!(result.rendered, 2);
     }
 
     #[tokio::test]
@@ -315,27 +325,32 @@ mod tests {
         ));
     }
 
+    fn make_config() -> crate::model::config::ProjectConfig {
+        serde_json::from_str(minimal_config_json()).unwrap()
+    }
+
     #[test]
-    fn load_captions_missing_file_returns_empty() {
-        let store = MemoryStore::new();
-        let project_dir = PathBuf::from("/project");
-        let captions = load_captions(&store, &project_dir, &AsoLocale::EnUs).unwrap();
+    fn load_captions_from_config_missing_returns_empty() {
+        let config = make_config();
+        let captions = load_captions_from_config(&config, &AsoLocale::EnUs);
         assert!(captions.is_empty());
     }
 
     #[test]
-    fn load_captions_parses_json() {
-        let store = MemoryStore::new();
-        let project_dir = PathBuf::from("/project");
-        let path = project_dir.join("fastlane/metadata/en-US/captions.json");
-        store
-            .write(
-                &path,
-                r#"[{"mode": 1, "title": "Hello"}, {"mode": 2, "title": "World", "subtitle": "Sub"}]"#,
-            )
-            .unwrap();
+    fn load_captions_from_config_parses_stored_captions() {
+        let mut config = make_config();
+        let locale_captions = serde_json::json!([
+            {"mode": 1, "title": "Hello"},
+            {"mode": 2, "title": "World", "subtitle": "Sub"}
+        ]);
+        let mut captions_map = serde_json::Map::new();
+        captions_map.insert("en-US".to_owned(), locale_captions);
+        config.extra.insert(
+            "captions".to_owned(),
+            serde_json::Value::Object(captions_map),
+        );
 
-        let captions = load_captions(&store, &project_dir, &AsoLocale::EnUs).unwrap();
+        let captions = load_captions_from_config(&config, &AsoLocale::EnUs);
         assert_eq!(captions.len(), 2);
         assert_eq!(captions[0].title, "Hello");
         assert_eq!(captions[1].subtitle.as_deref(), Some("Sub"));

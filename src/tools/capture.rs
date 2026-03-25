@@ -53,8 +53,13 @@ pub(crate) async fn handle_capture_screenshots(
     locales: Option<Vec<String>>,
     delay_ms: u64,
 ) -> Result<CaptureResult, AppShotsError> {
-    let target_modes = modes.unwrap_or_else(|| vec![1]);
-    let target_locales = locales.unwrap_or_else(|| vec!["en-US".to_owned()]);
+    let target_modes = modes.unwrap_or_else(|| (1..=5).collect());
+    let target_locales = locales.unwrap_or_else(|| {
+        crate::model::locale::ALL
+            .iter()
+            .map(|l| l.code().to_owned())
+            .collect()
+    });
 
     let captures_dir = project_dir.join("appshots/captures").join(device);
     let mut captures = Vec::new();
