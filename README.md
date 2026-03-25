@@ -1,6 +1,7 @@
 # appshots-mcp
 
 [![CI](https://github.com/Murzav/appshots-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Murzav/appshots-mcp/actions/workflows/ci.yml)
+![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/Murzav/077a4369198624c7b57c1fadfa868d65/raw/coverage.json)
 [![Crates.io](https://img.shields.io/crates/v/appshots-mcp)](https://crates.io/crates/appshots-mcp)
 [![Downloads](https://img.shields.io/crates/d/appshots-mcp)](https://crates.io/crates/appshots-mcp)
 [![MSRV](https://img.shields.io/badge/MSRV-1.90-blue)](https://blog.rust-lang.org/)

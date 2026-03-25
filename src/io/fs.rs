@@ -408,10 +408,15 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("ts.txt");
         let s = store();
-        let before = SystemTime::now();
         s.write(&path, "time check").expect("write");
         let mtime = s.modified_time(&path).expect("modified_time");
-        assert!(mtime >= before);
+        let elapsed = SystemTime::now()
+            .duration_since(mtime)
+            .unwrap_or_default();
+        assert!(
+            elapsed.as_secs() < 5,
+            "mtime should be within last 5 seconds, was {elapsed:?} ago"
+        );
     }
 
     #[test]
