@@ -166,7 +166,7 @@ Every template MUST follow this skeleton:
 ```typst
 // === Page setup ===
 #set page(width: {{page-width}}pt, height: {{page-height}}pt, margin: 0pt)
-#set text(font: "SF Pro Display", lang: sys.inputs.at("lang", default: "en"))
+#set text(font: "New Computer Modern", lang: sys.inputs.at("locale", default: "en"))
 
 // === Read inputs ===
 #let caption-title = sys.inputs.at("caption_title")
@@ -175,15 +175,15 @@ Every template MUST follow this skeleton:
 #let bg-color-raw = sys.inputs.at("bg_color", default: "oklch(25%, 0.05, 270deg)")
 #let text-dir = sys.inputs.at("text_direction", default: "ltr")
 
-// === Auto-scale text helper ===
-#let auto-text(body, max-size: 56pt, min-size: 20pt, target-width: 100%) = {{
+// === Auto-scale text helper (MUST use `context` for measure) ===
+#let auto-text(body, max-size: 56pt, min-size: 20pt, target-width: 360pt) = context {{
   let current = max-size
   while current > min-size {{
-    let m = measure(text(size: current, body))
+    let m = measure(text(size: current, weight: 800, body))
     if m.width <= target-width {{ break }}
     current = current - 1pt
   }}
-  text(size: current, body)
+  text(size: current, weight: 800, body)
 }}
 
 // === Background ===
@@ -237,13 +237,45 @@ The template is rendered at 3x scale (`typst-render` pixel_per_pt = 3.0) to prod
 - Line height: 1.1-1.2 for titles, 1.3-1.4 for body/subtitles.
 - Letter spacing: -0.02em to -0.01em for titles (tighter = more premium feel).
 - Explicitly set the font family — never rely on Typst's default font.
+- IMPORTANT: `measure()` requires a `context` block in Typst 0.14+. Always wrap it: `context {{ let m = measure(...); ... }}`.
 
 ## DON'T:
 - DON'T use fixed font sizes without the `measure()` auto-scale pattern — text WILL overflow on German (30-40% longer than English) and other verbose locales.
+- DON'T use `measure()` outside a `context` block — it will fail with "can only be used when context is known".
 - DON'T use more than 2 font weights in the entire template.
 - DON'T center-align long text — use left-align for LTR, right-align for RTL.
 - DON'T let text touch the edges — maintain minimum 40pt horizontal padding from screen edges.
 - DON'T use Typst's default font — always specify the font family explicitly.
+
+---
+
+# FONTS
+
+## Bundled fonts (always available, no setup required):
+- **New Computer Modern** — serif, good for body text
+- **Libertinus Serif** — serif alternative
+- **DejaVu Sans Mono** — monospace only
+
+These are the ONLY fonts available by default. For App Store quality, the user should add custom fonts to `appshots/fonts/` and the server loads them as `extra_fonts`.
+
+## If custom fonts are NOT available:
+- Use `"New Computer Modern"` as fallback — it's always available
+- Call `suggest_font` tool to get the recommended system font for each locale/script
+
+## If the user has added custom fonts:
+- Use the custom font name (e.g., "SF Pro Display", "Inter", etc.)
+- CJK locales may need separate fonts: call `suggest_font` for guidance
+- Arabic/Hebrew need RTL-capable fonts
+
+## System font recommendations (for when user installs them):
+- Latin: "SF Pro Display" or "Inter" (Apple platforms)
+- Arabic: "SF Arabic"
+- Hebrew: "SF Hebrew"
+- Japanese: "Hiragino Sans"
+- Korean: "Apple SD Gothic Neo"
+- Chinese: "PingFang SC" (Simplified), "PingFang TC" (Traditional)
+- Thai: "Thonburi"
+- Devanagari: "Kohinoor Devanagari"
 
 ---
 
