@@ -1,0 +1,35 @@
+---
+source: src/model/config.rs
+expression: json
+---
+{
+  "bundleId": "com.example.app",
+  "screens": [
+    {
+      "mode": 1,
+      "name": "Home",
+      "description": "Main home screen"
+    },
+    {
+      "mode": 2,
+      "name": "Settings"
+    }
+  ],
+  "templateMode": "per_screen",
+  "perScreenOverrides": {
+    "1": {
+      "bgColors": [
+        {
+          "l": 70.0,
+          "c": 0.15,
+          "h": 250.0
+        }
+      ],
+      "fontOverride": "Menlo"
+    }
+  },
+  "devices": [
+    "iPhone 6.9\"",
+    "iPad 13\""
+  ]
+}

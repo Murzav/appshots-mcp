@@ -1,0 +1,36 @@
+---
+source: src/model/template.rs
+expression: json
+---
+{
+  "mode": "per_screen",
+  "bgColors": [
+    {
+      "l": 70.0,
+      "c": 0.15,
+      "h": 250.0
+    },
+    {
+      "l": 50.0,
+      "c": 0.2,
+      "h": 30.0,
+      "alpha": 0.9
+    }
+  ],
+  "textColor": {
+    "l": 98.0,
+    "c": 0.0,
+    "h": 0.0
+  },
+  "fontFamily": "SF Pro Display",
+  "fontSizeTitle": 48.0,
+  "fontSizeSubtitle": 24.0,
+  "padding": {
+    "top": 40.0,
+    "bottom": 20.0,
+    "left": 16.0,
+    "right": 16.0
+  },
+  "screenshotScale": 0.85,
+  "screenshotOffsetY": 120.0
+}
