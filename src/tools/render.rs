@@ -15,7 +15,6 @@ use crate::model::device::{self, Device};
 use crate::model::locale::AsoLocale;
 use crate::service::template_resolver;
 use crate::service::typst_renderer::{self, RenderParams, RenderResult};
-use crate::service::typst_world;
 use crate::tools::{ProjectCache, resolve_config};
 
 const MAX_CONCURRENT_RENDERS: usize = 4;
@@ -109,8 +108,7 @@ pub(crate) async fn handle_compose_screenshots(
     };
 
     // Load project fonts once before the render loop
-    let project_fonts: Arc<Vec<Vec<u8>>> =
-        Arc::new(typst_world::load_project_fonts(store, project_dir));
+    let project_fonts: Arc<Vec<Vec<u8>>> = Arc::new(super::load_project_fonts(store, project_dir));
 
     let screenshots_base = project_dir.join("fastlane/screenshots");
 

@@ -76,7 +76,9 @@ impl From<AppShotsError> for rmcp::model::ErrorData {
             | AppShotsError::InvalidFormat(_)
             | AppShotsError::InvalidColor(_)
             | AppShotsError::JsonParse(_)
-            | AppShotsError::NoActiveProject => rmcp::model::ErrorCode::INVALID_PARAMS,
+            | AppShotsError::NoActiveProject
+            | AppShotsError::InvalidPath { .. }
+            | AppShotsError::FileTooLarge { .. } => rmcp::model::ErrorCode::INVALID_PARAMS,
             _ => rmcp::model::ErrorCode::INTERNAL_ERROR,
         };
         rmcp::model::ErrorData {
@@ -148,6 +150,14 @@ mod tests {
             AppShotsError::InvalidColor("bad oklch".into()),
             AppShotsError::JsonParse("unexpected".into()),
             AppShotsError::NoActiveProject,
+            AppShotsError::InvalidPath {
+                path: PathBuf::from("/bad"),
+                reason: "test".into(),
+            },
+            AppShotsError::FileTooLarge {
+                size_mb: 500,
+                max_mb: 200,
+            },
         ];
         for err in user_errors {
             let data: rmcp::model::ErrorData = err.into();
@@ -171,10 +181,6 @@ mod tests {
             AppShotsError::DeliverError("deliver".into()),
             AppShotsError::FileLocked {
                 path: PathBuf::from("/locked"),
-            },
-            AppShotsError::FileTooLarge {
-                size_mb: 500,
-                max_mb: 200,
             },
         ];
         for err in system_errors {

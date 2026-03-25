@@ -12,7 +12,6 @@ use typst::{Library, LibraryExt, World};
 use std::time::Duration;
 
 use crate::error::AppShotsError;
-use crate::io::FileStore;
 
 /// Default timeout for Typst template compilation.
 pub(crate) const COMPILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -30,28 +29,6 @@ fn bundled_fonts() -> &'static [Font] {
         }
         fonts
     })
-}
-
-/// Load all font files from the project's `appshots/fonts/` directory.
-///
-/// Returns raw font bytes for each `.ttf`, `.otf`, `.ttc`, or `.woff2` file found.
-/// Returns an empty vec if the directory doesn't exist or is unreadable.
-pub(crate) fn load_project_fonts(store: &dyn FileStore, project_dir: &Path) -> Vec<Vec<u8>> {
-    let fonts_dir = project_dir.join("appshots/fonts");
-    let entries = match store.list_dir(&fonts_dir) {
-        Ok(e) => e,
-        Err(_) => return vec![],
-    };
-    entries
-        .iter()
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("ttf" | "otf" | "ttc" | "woff2")
-            )
-        })
-        .filter_map(|p| store.read_bytes(p).ok())
-        .collect()
 }
 
 /// Minimal Typst World for rendering screenshot templates.
@@ -318,49 +295,5 @@ mod tests {
             result.unwrap_err(),
             AppShotsError::TemplateCompileError(_)
         ));
-    }
-
-    #[test]
-    fn load_project_fonts_returns_font_bytes() {
-        let store = MemoryStore::new();
-        let project_dir = Path::new("/project");
-        let fonts_dir = project_dir.join("appshots/fonts");
-
-        // Write fake font files
-        store
-            .write_bytes(&fonts_dir.join("custom.ttf"), &[0x00, 0x01, 0x00, 0x00])
-            .unwrap();
-        store
-            .write_bytes(&fonts_dir.join("bold.otf"), &[0x4F, 0x54, 0x54, 0x4F])
-            .unwrap();
-
-        let fonts = load_project_fonts(&store, project_dir);
-        assert_eq!(fonts.len(), 2);
-    }
-
-    #[test]
-    fn load_project_fonts_ignores_non_font_files() {
-        let store = MemoryStore::new();
-        let project_dir = Path::new("/project");
-        let fonts_dir = project_dir.join("appshots/fonts");
-
-        store
-            .write_bytes(&fonts_dir.join("readme.txt"), b"not a font")
-            .unwrap();
-        store
-            .write_bytes(&fonts_dir.join("custom.ttf"), &[0x00, 0x01])
-            .unwrap();
-
-        let fonts = load_project_fonts(&store, project_dir);
-        assert_eq!(fonts.len(), 1);
-    }
-
-    #[test]
-    fn load_project_fonts_empty_when_no_dir() {
-        let store = MemoryStore::new();
-        let project_dir = Path::new("/project");
-
-        let fonts = load_project_fonts(&store, project_dir);
-        assert!(fonts.is_empty());
     }
 }

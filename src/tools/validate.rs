@@ -9,7 +9,6 @@ use crate::model::device;
 use crate::model::locale::AsoLocale;
 use crate::service::template_resolver;
 use crate::service::typst_renderer::RenderParams;
-use crate::service::typst_world;
 use crate::service::validator::{self, IssueSeverity};
 
 #[derive(Debug, Serialize)]
@@ -61,7 +60,7 @@ pub(crate) async fn handle_validate_layout(
     let devices = device::REQUIRED;
 
     // Load project fonts once before the validation loop
-    let project_fonts = typst_world::load_project_fonts(store, project_dir);
+    let project_fonts = super::load_project_fonts(store, project_dir);
 
     let mut all_issues = Vec::new();
     let mut total_checks: usize = 0;

@@ -55,6 +55,28 @@ pub(crate) async fn mcp_log(peer: Option<&Peer<RoleServer>>, level: LoggingLevel
     let _ = peer.notify_logging_message(param).await;
 }
 
+/// Load all font files from the project's `appshots/fonts/` directory.
+///
+/// Returns raw font bytes for each `.ttf`, `.otf`, `.ttc`, or `.woff2` file found.
+/// Returns an empty vec if the directory doesn't exist or is unreadable.
+pub(crate) fn load_project_fonts(store: &dyn FileStore, project_dir: &Path) -> Vec<Vec<u8>> {
+    let fonts_dir = project_dir.join("appshots/fonts");
+    let entries = match store.list_dir(&fonts_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    entries
+        .iter()
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("ttf" | "otf" | "ttc" | "woff2")
+            )
+        })
+        .filter_map(|p| store.read_bytes(p).ok())
+        .collect()
+}
+
 /// Load or refresh the project config from appshots.json.
 pub(crate) async fn resolve_config(
     store: &dyn FileStore,
@@ -200,5 +222,49 @@ mod tests {
     async fn mcp_log_with_none_peer_is_noop() {
         // Should not panic
         mcp_log(None, LoggingLevel::Info, "test message").await;
+    }
+
+    #[test]
+    fn load_project_fonts_returns_font_bytes() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+
+        store
+            .write(Path::new("/project/appshots/fonts/custom.ttf"), "fake-ttf")
+            .unwrap();
+        store
+            .write(Path::new("/project/appshots/fonts/bold.otf"), "fake-otf")
+            .unwrap();
+
+        let fonts = load_project_fonts(&store, &project_dir);
+        assert_eq!(fonts.len(), 2);
+    }
+
+    #[test]
+    fn load_project_fonts_ignores_non_font_files() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+
+        store
+            .write(
+                Path::new("/project/appshots/fonts/readme.txt"),
+                "not a font",
+            )
+            .unwrap();
+        store
+            .write(Path::new("/project/appshots/fonts/custom.ttf"), "fake")
+            .unwrap();
+
+        let fonts = load_project_fonts(&store, &project_dir);
+        assert_eq!(fonts.len(), 1);
+    }
+
+    #[test]
+    fn load_project_fonts_empty_when_no_dir() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+
+        let fonts = load_project_fonts(&store, &project_dir);
+        assert!(fonts.is_empty());
     }
 }
