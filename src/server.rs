@@ -21,6 +21,233 @@ use tokio::sync::Mutex;
 use tracing::error;
 
 use crate::io::FileStore;
+
+// ---------------------------------------------------------------------------
+// MCP instructions — read by AI clients every conversation
+// ---------------------------------------------------------------------------
+
+const SERVER_INSTRUCTIONS: &str = "\
+appshots-mcp: MCP server for generating ASO-optimized App Store screenshots.
+Renders up to 780 final images per app (39 locales x 5-10 screenshots x 1-2 devices).
+AI logic lives in the client (you); the server provides tools, rendering, and validation.
+
+=== GETTING STARTED: PROMPTS ===
+
+Use prompts to kick off major workflows. Three prompts available:
+
+  prepare-app
+    First-time setup. Analyzes the app and creates a ScreenshotMode Swift enum
+    plus ScreenshotDataProvider, gated behind #if DEBUG.
+    Args: bundle_id (required), screens_count (optional, default 5)
+    When: once per app, before anything else.
+
+  design-template
+    Create or iterate on Typst templates for screenshot layouts.
+    All colors must use OKLCH. Renders previews for visual feedback.
+    Args: bundle_id (required), style (optional), per_screen (optional, default false)
+    When: after prepare-app, before generating screenshots.
+
+  generate-screenshots
+    Execute the full 10-step pipeline: scan, plan, caption, render, deliver.
+    Args: devices (optional), locales (optional), modes (optional)
+    When: to produce final screenshots end-to-end.
+
+=== PIPELINE OVERVIEW (10 STEPS) ===
+
+  Step 0  PREPARE APP     prompt: prepare-app             One-time app setup
+  Step 1  DESIGN          prompt: design-template          Template creation + iteration
+                          + preview_design tool            Render previews
+  Step 2  SCAN            scan_project                     Discover fastlane metadata
+  Step 3  ANALYZE         analyze_keywords                 Find keyword coverage gaps
+  Step 4  PLAN            plan_screens                     Map modes to keywords/messaging
+  Step 5  GENERATE        save_captions (en-US first)      Write English captions
+  Step 6  TRANSLATE       get_locale_keywords              Get locale keywords
+                          + save_captions (per locale)     Write translated captions
+  Step 7  VALIDATE        validate_layout                  Check templates compile
+  Step 8  CAPTURE         capture_screenshots              Capture from iOS simulator
+  Step 9  COMPOSE         compose_screenshots              Render final PNGs via Typst
+  Step 10 DELIVER         run_deliver                      Upload via fastlane deliver
+
+=== TOOLS REFERENCE ===
+
+--- Capture (2 tools) ---
+
+  list_simulators
+    List available iOS simulators with name, UDID, state, runtime.
+    No parameters.
+    Use: find the right device name/UDID before capturing.
+
+  capture_screenshots
+    Capture screenshots from iOS simulator with native device bezels.
+    Params: bundle_id, device, modes (opt), locales (opt), delay_ms (opt)
+    Use: capture_screenshots(bundle_id: \"com.app\", device: \"iPhone 17 Pro Max\")
+
+--- Discovery (3 tools) ---
+
+  scan_project
+    Scan fastlane/metadata/ for all locales, cache keywords/name/subtitle.
+    No parameters.
+    Use: run first to discover what metadata exists.
+
+  analyze_keywords
+    Analyze keyword coverage gaps for a locale's existing captions.
+    Params: locale
+    Use: analyze_keywords(locale: \"en-US\") to find unused keywords.
+
+  get_project_status
+    Get project readiness: config, template, locales, captions, captures.
+    No parameters.
+    Use: quick health check before starting work.
+
+--- Strategy (7 tools) ---
+
+  plan_screens
+    Save screen plans (mode to keywords to messaging) to appshots.json.
+    Params: plans (array of ScreenPlan)
+    Use: after analyze_keywords, map each mode to target keywords.
+
+  get_plans
+    Read current screen plans from appshots.json.
+    No parameters.
+    Use: review existing strategy before making changes.
+
+  save_captions
+    Save captions for a locale. Upserts by mode (preserves others).
+    Params: locale, captions (array of Caption)
+    Use: save_captions(locale: \"de-DE\", captions: [{mode: 5, title: \"...\"}])
+
+  get_captions
+    Read captions with optional locale/modes filter.
+    Params: locale (opt), modes (opt)
+    Use: get_captions(locale: \"en-US\") or get_captions(modes: [1,2])
+
+  get_locale_keywords
+    Read keywords.txt content for a locale from fastlane/metadata.
+    Params: locale
+    Use: get target keywords before writing translated captions.
+
+  get_caption_coverage
+    Coverage matrix showing which locales/modes have captions.
+    No parameters.
+    Use: find missing translations at a glance.
+
+  review_captions
+    Review captions against keyword coverage and glossary for ASO quality.
+    Params: locale (opt), modes (opt)
+    Use: quality check before final render.
+
+--- Design (6 tools) ---
+
+  save_template
+    Save a Typst template file (single shared or per-screen).
+    Params: template_source, mode (opt, omit for shared template)
+    Use: save_template(template_source: \"#set page()...\", mode: 3)
+
+  get_template
+    Read a Typst template. Resolves: templates/template-{mode}.typ
+    then templates/template.typ, then template.typ.
+    Params: mode (opt)
+    Use: get_template(mode: 5) to see what mode 5 uses.
+
+  preview_design
+    Render a single design preview image via Typst.
+    Params: mode, caption_title, caption_subtitle (opt), bg_colors, device, locale
+    Use: iterate on visual design before committing to all locales.
+
+  validate_layout
+    Validate that templates compile for all mode/locale/device combinations.
+    Params: modes (opt), locales (opt)
+    Use: validate_layout() to check everything, or filter to specific items.
+
+  suggest_font
+    Suggest a system font appropriate for a locale's script.
+    Params: locale
+    Use: suggest_font(locale: \"ja\") returns Hiragino Sans for Japanese.
+
+  compose_screenshots
+    Render final PNG screenshots via Typst for specified modes/locales.
+    Output goes to fastlane/screenshots/{locale}/.
+    Params: modes (opt), locales (opt)
+    Use: compose_screenshots(modes: [3], locales: [\"de-DE\"])
+
+--- Pipeline (1 tool) ---
+
+  run_deliver
+    Run fastlane deliver to upload screenshots to App Store Connect.
+    No parameters.
+    Use: final step after all screenshots are composed and verified.
+
+--- Glossary (2 tools) ---
+
+  get_glossary
+    Read glossary entries, optionally filtered by locale pair or substring.
+    Params: source_locale (opt), target_locale (opt), filter (opt)
+    Use: check terminology consistency before translating.
+
+  update_glossary
+    Add or update glossary entries for a source-to-target locale pair.
+    Params: source_locale, target_locale, entries (term-to-translation map)
+    Use: update_glossary(source_locale: \"en-US\", target_locale: \"de-DE\",
+         entries: {\"Track\": \"Verfolgen\"})
+
+=== KEY RULES ===
+
+  OKLCH ONLY
+    All colors must be oklch(L%, C, Hdeg). No hex, RGB, or HSL anywhere.
+    Example: oklch(50%, 0.15, 240deg)
+
+  GRANULAR REGENERATION
+    All rendering/validation tools accept optional modes and locales filters.
+    Omit both to process everything. Use filters for targeted updates.
+
+  TEMPLATE RESOLUTION ORDER
+    templates/template-{mode}.typ -> templates/template.typ -> template.typ
+    Per-screen templates override the shared template for specific modes.
+
+  LOCALE FALLBACK CHAINS
+    es-MX -> es-ES, fr-CA -> fr-FR, en-AU/CA/GB -> en-US,
+    pt-PT -> pt-BR, zh-Hant -> zh-Hans (keywords only)
+
+  REQUIRED APP STORE SIZES
+    iPhone 6.9 inch (1320 x 2868) -- mandatory
+    iPad 13 inch (2064 x 2752) -- mandatory
+    Other sizes are auto-scaled by App Store Connect.
+
+  MAX 10 SCREENSHOTS PER LOCALE
+
+=== COMMON WORKFLOWS ===
+
+  Fix one screenshot:
+    compose_screenshots(modes: [3])
+
+  Fix one locale on one screenshot:
+    compose_screenshots(modes: [5], locales: [\"de-DE\"])
+
+  Add a new locale:
+    scan_project -> get_locale_keywords(locale) -> save_captions(locale, ...) ->
+    compose_screenshots(locales: [locale])
+
+  Check project health:
+    get_project_status
+
+  Review ASO quality:
+    review_captions(locale: \"en-US\")
+
+  Re-capture after app change:
+    capture_screenshots(bundle_id, device, modes: [4])
+
+=== DIRECTORY STRUCTURE ===
+
+  fastlane/metadata/{locale}/        keywords.txt, name.txt, subtitle.txt
+  fastlane/screenshots/{locale}/     final output (fastlane deliver reads here)
+  appshots.json                      project config (plan, captions, template)
+  appshots/template.typ              single shared Typst template
+  appshots/templates/                per-screen Typst templates
+  appshots/fonts/                    custom fonts
+  appshots/captures/{device}/{locale}/  simulator captures with bezels
+  appshots/previews/                 design iteration previews
+  glossary.json                      shared glossary (also used by xcstrings-mcp)
+";
 use crate::model::color::OklchColor;
 use crate::model::device::Device;
 use crate::model::locale::AsoLocale;
@@ -813,12 +1040,7 @@ impl ServerHandler for AppShotsMcpServer {
                 .enable_prompts()
                 .build(),
         )
-        .with_instructions(
-            "appshots-mcp: MCP server for generating ASO-optimized App Store screenshots. \
-             Generates up to 780 final images per app (39 locales x 5-10 screenshots x 1-2 devices). \
-             Use the prepare-app prompt to start, then design-template, then generate-screenshots."
-                .to_owned(),
-        )
+        .with_instructions(SERVER_INSTRUCTIONS.to_owned())
     }
 }
 
@@ -854,7 +1076,51 @@ mod tests {
         let server = make_server();
         let info = server.get_info();
         assert!(info.instructions.is_some());
-        assert!(info.instructions.unwrap().contains("appshots-mcp"));
+        assert!(info.instructions.as_ref().unwrap().contains("appshots-mcp"));
+    }
+
+    #[test]
+    fn instructions_mention_all_tools() {
+        let tools = [
+            "list_simulators",
+            "capture_screenshots",
+            "scan_project",
+            "analyze_keywords",
+            "get_project_status",
+            "plan_screens",
+            "get_plans",
+            "save_captions",
+            "get_captions",
+            "get_locale_keywords",
+            "get_caption_coverage",
+            "review_captions",
+            "save_template",
+            "get_template",
+            "preview_design",
+            "validate_layout",
+            "suggest_font",
+            "compose_screenshots",
+            "run_deliver",
+            "get_glossary",
+            "update_glossary",
+        ];
+        for tool in &tools {
+            assert!(
+                SERVER_INSTRUCTIONS.contains(tool),
+                "Instructions missing tool: {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn instructions_mention_all_prompts() {
+        let prompts = ["prepare-app", "design-template", "generate-screenshots"];
+        for prompt in &prompts {
+            assert!(
+                SERVER_INSTRUCTIONS.contains(prompt),
+                "Instructions missing prompt: {prompt}"
+            );
+        }
     }
 
     #[test]

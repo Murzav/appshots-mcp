@@ -1,17 +1,24 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::Arc;
 
 use serde::Serialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 
 use crate::error::AppShotsError;
 use crate::io::FileStore;
+use crate::model::color::OklchColor;
 use crate::model::config::Caption;
 use crate::model::device::{self, Device};
 use crate::model::locale::AsoLocale;
 use crate::service::template_resolver;
-use crate::service::typst_renderer::{self, RenderParams};
+use crate::service::typst_renderer::{self, RenderParams, RenderResult};
+use crate::service::typst_world;
 use crate::tools::{ProjectCache, resolve_config};
+
+const MAX_CONCURRENT_RENDERS: usize = 4;
 
 #[derive(Debug, Serialize)]
 pub struct ComposeResult {
@@ -101,34 +108,58 @@ pub(crate) async fn handle_compose_screenshots(
         &config.devices
     };
 
+    // Load project fonts once before the render loop
+    let project_fonts: Arc<Vec<Vec<u8>>> =
+        Arc::new(typst_world::load_project_fonts(store, project_dir));
+
     let screenshots_base = project_dir.join("fastlane/screenshots");
-    let mut screenshots = Vec::new();
+
+    // Task A: Cache template sources by mode before the main loop
+    let mut template_cache: HashMap<u8, Arc<String>> = HashMap::with_capacity(target_modes.len());
+    for &mode in &target_modes {
+        let template_path = template_resolver::resolve_template(base_dir, mode, |path| {
+            store.exists(Path::new(path))
+        })?;
+        let source = store.read(&template_path.resolved)?;
+        template_cache.insert(mode, Arc::new(source));
+    }
+
+    // Pre-compute bg_colors per mode
+    let mut bg_colors_cache: HashMap<u8, Vec<OklchColor>> =
+        HashMap::with_capacity(target_modes.len());
+    for &mode in &target_modes {
+        let bg_colors = config
+            .per_screen_overrides
+            .as_ref()
+            .and_then(|o| o.get(&mode))
+            .and_then(|o| o.bg_colors.clone())
+            .unwrap_or_default();
+        bg_colors_cache.insert(mode, bg_colors);
+    }
+
+    // Collect all render combos: read I/O upfront, then render in parallel
+    struct RenderCombo {
+        locale: AsoLocale,
+        mode: u8,
+        device: Device,
+        output_path: PathBuf,
+        params: RenderParams,
+    }
+
+    let mut combos = Vec::new();
 
     for &locale in &target_locales {
         let captions = load_captions_from_config(&config, &locale);
 
         for &mode in &target_modes {
-            // Resolve template
-            let template_path = template_resolver::resolve_template(base_dir, mode, |path| {
-                store.exists(Path::new(path))
-            })?;
-            let template_source = store.read(&template_path.resolved)?;
+            let template_source = Arc::clone(template_cache.get(&mode).expect("mode was cached"));
 
-            // Find caption for this mode
             let caption = captions.iter().find(|c| c.mode == mode);
             let title = caption.map(|c| c.title.as_str()).unwrap_or("Screenshot");
             let subtitle = caption.and_then(|c| c.subtitle.as_deref());
             let keyword = caption.and_then(|c| c.keyword.as_deref());
+            let bg_colors = bg_colors_cache.get(&mode).cloned().unwrap_or_default();
 
-            // Get bg_colors from per_screen_overrides if available
-            let bg_colors = config
-                .per_screen_overrides
-                .as_ref()
-                .and_then(|o| o.get(&mode))
-                .and_then(|o| o.bg_colors.clone())
-                .unwrap_or_default();
-
-            // Load screenshot capture if available
             for &dev in target_devices {
                 let capture_path = appshots_dir
                     .join("captures")
@@ -141,8 +172,12 @@ pub(crate) async fn handle_compose_screenshots(
                     None
                 };
 
+                let locale_dir = screenshots_base.join(locale.code());
+                let filename = format!("{mode}_{}.png", dev.display_name());
+                let output_path = locale_dir.join(&filename);
+
                 let params = RenderParams {
-                    template_source: template_source.clone(),
+                    template_source: (*template_source).clone(),
                     caption_title: title.to_owned(),
                     caption_subtitle: subtitle.map(|s| s.to_owned()),
                     keyword: keyword.map(|s| s.to_owned()),
@@ -150,29 +185,66 @@ pub(crate) async fn handle_compose_screenshots(
                     device: dev,
                     locale,
                     screenshot_data,
-                    extra_fonts: vec![],
+                    extra_fonts: (*project_fonts).clone(),
                 };
 
-                let result = typst_renderer::render_screenshot_async(&params).await?;
-
-                // Save to fastlane/screenshots/{locale}/{mode}_{device}.png
-                let locale_dir = screenshots_base.join(locale.code());
-                store.create_parent_dirs(&locale_dir.join("_"))?;
-
-                let filename = format!("{mode}_{}.png", dev.display_name());
-                let output_path = locale_dir.join(&filename);
-                store.write_bytes(&output_path, &result.png_bytes)?;
-
-                screenshots.push(ScreenshotInfo {
-                    locale: locale.code().to_owned(),
+                combos.push(RenderCombo {
+                    locale,
                     mode,
-                    device: dev.display_name().to_owned(),
-                    output_path: output_path.to_string_lossy().into_owned(),
-                    width: result.width,
-                    height: result.height,
+                    device: dev,
+                    output_path,
+                    params,
                 });
             }
         }
+    }
+
+    // Task B: Parallel rendering with semaphore
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_RENDERS));
+    let mut join_set = JoinSet::new();
+
+    for (idx, combo) in combos.into_iter().enumerate() {
+        let sem = Arc::clone(&semaphore);
+        join_set.spawn(async move {
+            let _permit = sem
+                .acquire()
+                .await
+                .map_err(|e| AppShotsError::RenderError(format!("semaphore closed: {e}")))?;
+            let result = typst_renderer::render_screenshot_async(&combo.params).await?;
+            Ok::<(usize, AsoLocale, u8, Device, PathBuf, RenderResult), AppShotsError>((
+                idx,
+                combo.locale,
+                combo.mode,
+                combo.device,
+                combo.output_path,
+                result,
+            ))
+        });
+    }
+
+    // Collect results, preserving deterministic order
+    let mut indexed_results = Vec::new();
+    while let Some(join_result) = join_set.join_next().await {
+        let render_result = join_result
+            .map_err(|e| AppShotsError::RenderError(format!("render task panicked: {e}")))??;
+        indexed_results.push(render_result);
+    }
+    indexed_results.sort_by_key(|(idx, ..)| *idx);
+
+    // Write outputs sequentially (FileStore is borrowed, not Send into tasks)
+    let mut screenshots = Vec::with_capacity(indexed_results.len());
+    for (_idx, locale, mode, device, output_path, result) in indexed_results {
+        store.create_parent_dirs(&output_path)?;
+        store.write_bytes(&output_path, &result.png_bytes)?;
+
+        screenshots.push(ScreenshotInfo {
+            locale: locale.code().to_owned(),
+            mode,
+            device: device.display_name().to_owned(),
+            output_path: output_path.to_string_lossy().into_owned(),
+            width: result.width,
+            height: result.height,
+        });
     }
 
     Ok(ComposeResult {
@@ -354,5 +426,43 @@ mod tests {
         assert_eq!(captions.len(), 2);
         assert_eq!(captions[0].title, "Hello");
         assert_eq!(captions[1].subtitle.as_deref(), Some("Sub"));
+    }
+
+    #[tokio::test]
+    async fn compose_multiple_modes_batch_count() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+
+        let config_json = r#"{
+            "bundleId": "com.example.app",
+            "screens": [
+                {"mode": 1, "name": "Home"},
+                {"mode": 2, "name": "Settings"},
+                {"mode": 3, "name": "Profile"}
+            ],
+            "templateMode": "single",
+            "devices": ["iPhone 6.9\""]
+        }"#;
+        let config_path = project_dir.join("appshots.json");
+        store.write(&config_path, config_json).unwrap();
+
+        let template_path = project_dir.join("appshots/template.typ");
+        store.write(&template_path, MINIMAL_TEMPLATE).unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+
+        let result = handle_compose_screenshots(
+            &store,
+            &cache,
+            &config_path,
+            &project_dir,
+            None,
+            Some(vec!["en-US".to_owned(), "ja".to_owned()]),
+        )
+        .await
+        .unwrap();
+
+        // 3 modes × 2 locales × 1 device = 6 screenshots
+        assert_eq!(result.rendered, 6);
     }
 }

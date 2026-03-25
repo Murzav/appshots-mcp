@@ -68,8 +68,19 @@ impl From<crate::model::locale::ParseLocaleError> for AppShotsError {
 
 impl From<AppShotsError> for rmcp::model::ErrorData {
     fn from(e: AppShotsError) -> Self {
+        let code = match &e {
+            AppShotsError::FileNotFound { .. }
+            | AppShotsError::ConfigNotFound { .. }
+            | AppShotsError::TemplateNotFound { .. }
+            | AppShotsError::LocaleNotFound(_)
+            | AppShotsError::InvalidFormat(_)
+            | AppShotsError::InvalidColor(_)
+            | AppShotsError::JsonParse(_)
+            | AppShotsError::NoActiveProject => rmcp::model::ErrorCode::INVALID_PARAMS,
+            _ => rmcp::model::ErrorCode::INTERNAL_ERROR,
+        };
         rmcp::model::ErrorData {
-            code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+            code,
             message: e.to_string().into(),
             data: None,
         }
@@ -121,11 +132,60 @@ mod tests {
     }
 
     #[test]
-    fn into_error_data() {
-        let err = AppShotsError::InvalidColor("bad oklch".into());
-        let data: rmcp::model::ErrorData = err.into();
-        assert_eq!(data.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-        assert_eq!(data.message.as_ref(), "invalid color: bad oklch");
+    fn into_error_data_invalid_params_for_user_errors() {
+        let user_errors: Vec<AppShotsError> = vec![
+            AppShotsError::FileNotFound {
+                path: PathBuf::from("/missing"),
+            },
+            AppShotsError::ConfigNotFound {
+                path: PathBuf::from("/config"),
+            },
+            AppShotsError::TemplateNotFound {
+                path: PathBuf::from("/tpl"),
+            },
+            AppShotsError::LocaleNotFound("xx-XX".into()),
+            AppShotsError::InvalidFormat("bad".into()),
+            AppShotsError::InvalidColor("bad oklch".into()),
+            AppShotsError::JsonParse("unexpected".into()),
+            AppShotsError::NoActiveProject,
+        ];
+        for err in user_errors {
+            let data: rmcp::model::ErrorData = err.into();
+            assert_eq!(
+                data.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "expected INVALID_PARAMS for: {}",
+                data.message
+            );
+        }
+    }
+
+    #[test]
+    fn into_error_data_internal_error_for_system_errors() {
+        let system_errors: Vec<AppShotsError> = vec![
+            AppShotsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io")),
+            AppShotsError::TemplateCompileError("compile".into()),
+            AppShotsError::RenderError("render".into()),
+            AppShotsError::CaptureError("capture".into()),
+            AppShotsError::SimulatorError("sim".into()),
+            AppShotsError::DeliverError("deliver".into()),
+            AppShotsError::FileLocked {
+                path: PathBuf::from("/locked"),
+            },
+            AppShotsError::FileTooLarge {
+                size_mb: 500,
+                max_mb: 200,
+            },
+        ];
+        for err in system_errors {
+            let data: rmcp::model::ErrorData = err.into();
+            assert_eq!(
+                data.code,
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "expected INTERNAL_ERROR for: {}",
+                data.message
+            );
+        }
     }
 
     #[test]

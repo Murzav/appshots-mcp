@@ -35,7 +35,9 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let store = Arc::new(appshots_mcp::io::fs::FsFileStore::new());
+    let store = Arc::new(
+        appshots_mcp::io::fs::FsFileStore::new().with_project_dir(cli.project_dir.clone()),
+    );
     let server = appshots_mcp::server::AppShotsMcpServer::new(
         store,
         cli.project_dir,

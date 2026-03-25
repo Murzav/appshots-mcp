@@ -8,7 +8,7 @@ use crate::model::color::OklchColor;
 use crate::model::device::Device;
 use crate::model::locale::AsoLocale;
 use crate::service::typst_renderer::{RenderParams, RenderResult};
-use crate::service::{font_resolver, template_resolver};
+use crate::service::{font_resolver, template_resolver, typst_world};
 
 /// Input parameters for preview_design.
 pub struct PreviewParams<'a> {
@@ -51,6 +51,9 @@ pub(crate) async fn handle_preview_design(
     // Read template source
     let template_source = p.store.read(&template_path.resolved)?;
 
+    // Load project fonts
+    let project_fonts = typst_world::load_project_fonts(p.store, p.project_dir);
+
     // Build render params
     let render_params = RenderParams {
         template_source,
@@ -61,7 +64,7 @@ pub(crate) async fn handle_preview_design(
         device: p.device,
         locale: p.locale,
         screenshot_data: None,
-        extra_fonts: vec![],
+        extra_fonts: project_fonts,
     };
 
     // Render

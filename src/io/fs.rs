@@ -13,6 +13,7 @@ const TEMP_SUFFIX: &str = ".tmp";
 /// Filesystem-backed `FileStore` for production use.
 pub struct FsFileStore {
     max_file_size: u64,
+    project_dir: Option<PathBuf>,
 }
 
 impl FsFileStore {
@@ -24,9 +25,30 @@ impl FsFileStore {
 
         let store = Self {
             max_file_size: max_mb * 1024 * 1024,
+            project_dir: None,
         };
         store.cleanup_orphan_temps();
         store
+    }
+
+    /// Set the project directory for path containment checks.
+    /// All file operations will be restricted to paths within this directory.
+    pub fn with_project_dir(mut self, dir: PathBuf) -> Self {
+        self.project_dir = dir.canonicalize().ok().or(Some(dir));
+        self
+    }
+
+    /// Verify that a canonical path is within the project directory.
+    fn check_containment(&self, canonical: &Path) -> Result<(), AppShotsError> {
+        if let Some(ref root) = self.project_dir
+            && !canonical.starts_with(root)
+        {
+            return Err(AppShotsError::InvalidPath {
+                path: canonical.to_path_buf(),
+                reason: "path escapes project directory".into(),
+            });
+        }
+        Ok(())
     }
 
     /// Remove leftover temp files from a previous crash.
@@ -169,6 +191,7 @@ impl FileStore for FsFileStore {
     fn read(&self, path: &Path) -> Result<String, AppShotsError> {
         Self::validate_path(path)?;
         let canonical = Self::canonicalize(path)?;
+        self.check_containment(&canonical)?;
         let metadata = fs::metadata(&canonical).map_err(|_| AppShotsError::FileNotFound {
             path: path.to_path_buf(),
         })?;
@@ -182,6 +205,7 @@ impl FileStore for FsFileStore {
     fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, AppShotsError> {
         Self::validate_path(path)?;
         let canonical = Self::canonicalize(path)?;
+        self.check_containment(&canonical)?;
         let metadata = fs::metadata(&canonical).map_err(|_| AppShotsError::FileNotFound {
             path: path.to_path_buf(),
         })?;
@@ -194,6 +218,7 @@ impl FileStore for FsFileStore {
     fn write(&self, path: &Path, content: &str) -> Result<(), AppShotsError> {
         Self::validate_path(path)?;
         let canonical = Self::canonicalize(path)?;
+        self.check_containment(&canonical)?;
         Self::try_lock(&canonical)?;
         Self::atomic_write(&canonical, content.as_bytes())
     }
@@ -201,6 +226,7 @@ impl FileStore for FsFileStore {
     fn write_bytes(&self, path: &Path, content: &[u8]) -> Result<(), AppShotsError> {
         Self::validate_path(path)?;
         let canonical = Self::canonicalize(path)?;
+        self.check_containment(&canonical)?;
         Self::try_lock(&canonical)?;
         Self::atomic_write(&canonical, content)
     }
@@ -208,6 +234,7 @@ impl FileStore for FsFileStore {
     fn modified_time(&self, path: &Path) -> Result<SystemTime, AppShotsError> {
         Self::validate_path(path)?;
         let canonical = Self::canonicalize(path)?;
+        self.check_containment(&canonical)?;
         let metadata = fs::metadata(&canonical).map_err(|_| AppShotsError::FileNotFound {
             path: path.to_path_buf(),
         })?;
@@ -215,12 +242,46 @@ impl FileStore for FsFileStore {
     }
 
     fn exists(&self, path: &Path) -> bool {
-        Self::validate_path(path).is_ok() && Self::canonicalize(path).is_ok() && path.exists()
+        Self::validate_path(path).is_ok()
+            && Self::canonicalize(path)
+                .map(|c| self.check_containment(&c).is_ok())
+                .unwrap_or(false)
+            && path.exists()
     }
 
     fn create_parent_dirs(&self, path: &Path) -> Result<(), AppShotsError> {
         Self::validate_path(path)?;
         if let Some(parent) = path.parent() {
+            // Check containment if project_dir is set — use the path as-is
+            // since parent dirs may not exist yet (can't canonicalize)
+            if let Some(ref root) = self.project_dir {
+                // For non-existing paths, check if the absolute form starts with root
+                let abs = if parent.is_absolute() {
+                    parent.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(AppShotsError::Io)?
+                        .join(parent)
+                };
+                // Normalize by checking the longest existing ancestor
+                let mut check = abs.as_path();
+                loop {
+                    if check.exists() {
+                        let canonical = check.canonicalize().map_err(AppShotsError::Io)?;
+                        if !canonical.starts_with(root) {
+                            return Err(AppShotsError::InvalidPath {
+                                path: path.to_path_buf(),
+                                reason: "path escapes project directory".into(),
+                            });
+                        }
+                        break;
+                    }
+                    match check.parent() {
+                        Some(p) => check = p,
+                        None => break,
+                    }
+                }
+            }
             fs::create_dir_all(parent)?;
         }
         Ok(())
@@ -229,6 +290,7 @@ impl FileStore for FsFileStore {
     fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, AppShotsError> {
         Self::validate_path(path)?;
         let canonical = Self::canonicalize(path)?;
+        self.check_containment(&canonical)?;
         let entries = fs::read_dir(&canonical).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AppShotsError::FileNotFound {
@@ -256,6 +318,7 @@ mod tests {
     fn store() -> FsFileStore {
         FsFileStore {
             max_file_size: 1024 * 1024, // 1 MB for tests
+            project_dir: None,
         }
     }
 
@@ -297,6 +360,7 @@ mod tests {
         let path = dir.path().join("big.bin");
         let s = FsFileStore {
             max_file_size: 10, // 10 bytes
+            project_dir: None,
         };
         std::fs::write(&path, "this is way too large").expect("raw write");
         let err = s.read(&path).expect_err("should fail");
@@ -391,6 +455,48 @@ mod tests {
         let missing = dir.path().join("nope");
         let err = s.list_dir(&missing).expect_err("should fail");
         assert!(matches!(err, AppShotsError::FileNotFound { .. }));
+    }
+
+    #[test]
+    fn containment_blocks_symlink_escape() {
+        let project = TempDir::new().expect("project tempdir");
+        let outside = TempDir::new().expect("outside tempdir");
+
+        // Create a file outside the project
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret data").expect("write outside");
+
+        // Create a symlink inside the project pointing outside
+        let link_path = project.path().join("escape.txt");
+        std::os::unix::fs::symlink(&outside_file, &link_path).expect("symlink");
+
+        let s = FsFileStore::new().with_project_dir(project.path().to_path_buf());
+
+        let err = s
+            .read(&link_path)
+            .expect_err("should fail containment check");
+        assert!(matches!(err, AppShotsError::InvalidPath { .. }));
+    }
+
+    #[test]
+    fn containment_allows_normal_paths() {
+        let project = TempDir::new().expect("tempdir");
+        let s = FsFileStore::new().with_project_dir(project.path().to_path_buf());
+
+        let path = project.path().join("hello.txt");
+        s.write(&path, "hello").expect("write should succeed");
+        let content = s.read(&path).expect("read should succeed");
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn containment_none_allows_any_path() {
+        // Default (no project_dir) should work as before
+        let dir = TempDir::new().expect("tempdir");
+        let s = store();
+        let path = dir.path().join("file.txt");
+        s.write(&path, "data").expect("write");
+        assert_eq!(s.read(&path).expect("read"), "data");
     }
 
     #[test]
