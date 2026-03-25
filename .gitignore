@@ -1,4 +1,10 @@
 /target
-/.claude/
-/docs/
 CLAUDE.md
+.claude/
+docs/
+test-output/
+tasks/
+*.swp
+*.swo
+*~
+.DS_Store
