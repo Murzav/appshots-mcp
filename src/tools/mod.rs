@@ -2,6 +2,7 @@ pub mod analyze;
 pub mod captions;
 pub mod capture;
 pub mod design;
+pub mod glossary;
 pub mod plan;
 pub mod render;
 pub mod scan;
@@ -44,6 +45,8 @@ impl ProjectCache {
 }
 
 /// Send an MCP log notification. Fire-and-forget.
+/// Will be used when individual tools add progress logging.
+#[allow(dead_code)]
 pub(crate) async fn mcp_log(peer: Option<&Peer<RoleServer>>, level: LoggingLevel, msg: &str) {
     let Some(peer) = peer else { return };
     let param =
