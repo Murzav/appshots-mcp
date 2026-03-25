@@ -85,6 +85,94 @@ pub(crate) async fn handle_scan_project(
     Ok(result)
 }
 
+/// Summary of the project's readiness state.
+#[derive(Debug, Serialize)]
+pub(crate) struct ProjectStatus {
+    pub config_exists: bool,
+    pub template_exists: bool,
+    pub locales_scanned: usize,
+    pub captions_count: usize,
+    pub captures_count: usize,
+    pub ready_to_compose: bool,
+}
+
+/// Get the current project status.
+pub(crate) async fn handle_get_project_status(
+    store: &dyn FileStore,
+    cache: &Mutex<ProjectCache>,
+    project_dir: &Path,
+    config_path: &Path,
+) -> Result<ProjectStatus, AppShotsError> {
+    let config_exists = store.exists(config_path);
+
+    // Check for any template (single or per-screen)
+    let appshots_dir = project_dir.join("appshots");
+    let template_exists = store.exists(&appshots_dir.join("template.typ"))
+        || store.exists(&appshots_dir.join("templates/template.typ"));
+
+    // Count scanned locales from cache
+    let locales_scanned = {
+        let guard = cache.lock().await;
+        guard.metadata.len()
+    };
+
+    // Count captions from config
+    let captions_count = if config_exists {
+        if let Ok(config) = super::resolve_config(store, cache, config_path).await {
+            config
+                .extra
+                .get("captions")
+                .and_then(|v| v.as_object())
+                .map(|obj| {
+                    obj.values()
+                        .filter_map(|v| v.as_array())
+                        .map(|a| a.len())
+                        .sum()
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Count captures (PNG files in appshots/captures/)
+    let captures_dir = appshots_dir.join("captures");
+    let captures_count = if store.exists(&captures_dir) {
+        count_png_files(store, &captures_dir)
+    } else {
+        0
+    };
+
+    let ready_to_compose = config_exists && template_exists && captions_count > 0;
+
+    Ok(ProjectStatus {
+        config_exists,
+        template_exists,
+        locales_scanned,
+        captions_count,
+        captures_count,
+        ready_to_compose,
+    })
+}
+
+/// Recursively count PNG files under a directory.
+fn count_png_files(store: &dyn FileStore, dir: &Path) -> usize {
+    let Ok(entries) = store.list_dir(dir) else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries {
+        if entry.extension().and_then(|e| e.to_str()) == Some("png") {
+            count += 1;
+        } else if store.list_dir(&entry).is_ok() {
+            count += count_png_files(store, &entry);
+        }
+    }
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +268,149 @@ mod tests {
 
         assert_eq!(result.locales_found, 1);
         assert_eq!(result.locales[0].locale, "en-US");
+    }
+
+    fn minimal_config_json() -> &'static str {
+        r#"{
+            "bundleId": "com.example.app",
+            "screens": [],
+            "templateMode": "single",
+            "devices": ["iPhone 6.9\""]
+        }"#
+    }
+
+    fn config_with_captions_json() -> &'static str {
+        r#"{
+            "bundleId": "com.example.app",
+            "screens": [],
+            "templateMode": "single",
+            "devices": ["iPhone 6.9\""],
+            "captions": {
+                "en-US": [
+                    {"mode": 1, "title": "Title 1"},
+                    {"mode": 2, "title": "Title 2"}
+                ],
+                "de-DE": [
+                    {"mode": 1, "title": "Titel 1"}
+                ]
+            }
+        }"#
+    }
+
+    #[tokio::test]
+    async fn project_status_empty_project() {
+        let store = MemoryStore::new();
+        let cache = Mutex::new(ProjectCache::new());
+        let config_path = project_dir().join("appshots.json");
+
+        let status = handle_get_project_status(&store, &cache, &project_dir(), &config_path)
+            .await
+            .unwrap();
+
+        assert!(!status.config_exists);
+        assert!(!status.template_exists);
+        assert_eq!(status.locales_scanned, 0);
+        assert_eq!(status.captions_count, 0);
+        assert_eq!(status.captures_count, 0);
+        assert!(!status.ready_to_compose);
+    }
+
+    #[tokio::test]
+    async fn project_status_with_config_and_template() {
+        let store = MemoryStore::new();
+        let config_path = project_dir().join("appshots.json");
+        store.write(&config_path, minimal_config_json()).unwrap();
+        store
+            .write(&project_dir().join("appshots/template.typ"), "#set page()")
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let status = handle_get_project_status(&store, &cache, &project_dir(), &config_path)
+            .await
+            .unwrap();
+
+        assert!(status.config_exists);
+        assert!(status.template_exists);
+        assert!(!status.ready_to_compose); // no captions yet
+    }
+
+    #[tokio::test]
+    async fn project_status_ready_to_compose() {
+        let store = MemoryStore::new();
+        let config_path = project_dir().join("appshots.json");
+        store
+            .write(&config_path, config_with_captions_json())
+            .unwrap();
+        store
+            .write(&project_dir().join("appshots/template.typ"), "#set page()")
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let status = handle_get_project_status(&store, &cache, &project_dir(), &config_path)
+            .await
+            .unwrap();
+
+        assert!(status.config_exists);
+        assert!(status.template_exists);
+        assert_eq!(status.captions_count, 3); // 2 en-US + 1 de-DE
+        assert!(status.ready_to_compose);
+    }
+
+    #[tokio::test]
+    async fn project_status_counts_scanned_locales() {
+        let store = MemoryStore::new();
+        let config_path = project_dir().join("appshots.json");
+        store.write(&config_path, minimal_config_json()).unwrap();
+        write_locale(&store, "en-US", "photo", "App", "Sub");
+        write_locale(&store, "de-DE", "foto", "App", "");
+
+        let cache = Mutex::new(ProjectCache::new());
+        // Scan first to populate cache
+        handle_scan_project(&store, &cache, &project_dir())
+            .await
+            .unwrap();
+
+        let status = handle_get_project_status(&store, &cache, &project_dir(), &config_path)
+            .await
+            .unwrap();
+        assert_eq!(status.locales_scanned, 2);
+    }
+
+    #[tokio::test]
+    async fn project_status_counts_captures() {
+        let store = MemoryStore::new();
+        let config_path = project_dir().join("appshots.json");
+        store.write(&config_path, minimal_config_json()).unwrap();
+
+        // Add some PNG "captures"
+        let captures_dir = project_dir().join("appshots/captures/iPhone/en-US");
+        store
+            .write(&captures_dir.join("mode-1.png"), "fake-png")
+            .unwrap();
+        store
+            .write(&captures_dir.join("mode-2.png"), "fake-png")
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let status = handle_get_project_status(&store, &cache, &project_dir(), &config_path)
+            .await
+            .unwrap();
+        assert_eq!(status.captures_count, 2);
+    }
+
+    #[test]
+    fn project_status_serialization() {
+        let status = ProjectStatus {
+            config_exists: true,
+            template_exists: true,
+            locales_scanned: 5,
+            captions_count: 10,
+            captures_count: 20,
+            ready_to_compose: true,
+        };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["config_exists"], true);
+        assert_eq!(json["captions_count"], 10);
+        assert_eq!(json["ready_to_compose"], true);
     }
 }

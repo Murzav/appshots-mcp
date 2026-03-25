@@ -1,6 +1,7 @@
 pub mod analyze;
 pub mod captions;
 pub mod capture;
+pub mod deliver;
 pub mod design;
 pub mod glossary;
 pub mod plan;

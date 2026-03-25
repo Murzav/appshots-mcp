@@ -89,7 +89,14 @@ impl FileStore for MemoryStore {
     fn exists(&self, path: &Path) -> bool {
         self.files
             .lock()
-            .map(|files| files.contains_key(path))
+            .map(|files| {
+                // Exact file match
+                if files.contains_key(path) {
+                    return true;
+                }
+                // Directory-like match: any key has this path as prefix
+                files.keys().any(|k| k.starts_with(path))
+            })
             .unwrap_or(false)
     }
 

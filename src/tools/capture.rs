@@ -158,6 +158,85 @@ async fn find_simulator_window_id() -> Result<u32, AppShotsError> {
     ))
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct SimulatorInfo {
+    pub name: String,
+    pub udid: String,
+    pub state: String,
+    pub runtime: String,
+}
+
+/// List available iOS simulators via `xcrun simctl list devices -j`.
+pub(crate) async fn handle_list_simulators() -> Result<Vec<SimulatorInfo>, AppShotsError> {
+    let output = Command::new("xcrun")
+        .args(["simctl", "list", "devices", "-j"])
+        .output()
+        .await
+        .map_err(|e| AppShotsError::SimulatorError(format!("failed to list simulators: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppShotsError::SimulatorError(format!(
+            "simctl list devices failed: {stderr}"
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_simctl_devices(&stdout)
+}
+
+/// Parse the JSON output of `xcrun simctl list devices -j`.
+pub(crate) fn parse_simctl_devices(json: &str) -> Result<Vec<SimulatorInfo>, AppShotsError> {
+    let root: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| AppShotsError::JsonParse(e.to_string()))?;
+
+    let devices = root
+        .get("devices")
+        .and_then(|d| d.as_object())
+        .ok_or_else(|| AppShotsError::JsonParse("missing 'devices' key in simctl output".into()))?;
+
+    let mut result = Vec::new();
+    for (runtime, device_list) in devices {
+        let Some(arr) = device_list.as_array() else {
+            continue;
+        };
+        for device in arr {
+            let name = device
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let udid = device
+                .get("udid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let state = device
+                .get("state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+
+            // Extract runtime name from the key (e.g. "com.apple.CoreSimulator.SimRuntime.iOS-18-0" -> "iOS-18-0")
+            let runtime_short = runtime
+                .rsplit('.')
+                .next()
+                .unwrap_or(runtime)
+                .replace('-', ".");
+
+            result.push(SimulatorInfo {
+                name,
+                udid,
+                state,
+                runtime: runtime_short,
+            });
+        }
+    }
+
+    result.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.runtime.cmp(&b.runtime)));
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +313,97 @@ mod tests {
         assert_eq!(json["captured"], 1);
         assert_eq!(json["captures"][0]["mode"], 1);
         assert_eq!(json["captures"][0]["locale"], "en-US");
+    }
+
+    const SAMPLE_SIMCTL_JSON: &str = r#"{
+        "devices": {
+            "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                {
+                    "name": "iPhone 16 Pro Max",
+                    "udid": "AAAA-BBBB-CCCC",
+                    "state": "Shutdown",
+                    "isAvailable": true
+                },
+                {
+                    "name": "iPhone 16",
+                    "udid": "DDDD-EEEE-FFFF",
+                    "state": "Booted",
+                    "isAvailable": true
+                }
+            ],
+            "com.apple.CoreSimulator.SimRuntime.iOS-17-5": [
+                {
+                    "name": "iPad Pro 13-inch (M4)",
+                    "udid": "1111-2222-3333",
+                    "state": "Shutdown",
+                    "isAvailable": true
+                }
+            ]
+        }
+    }"#;
+
+    #[test]
+    fn parse_simctl_devices_extracts_all() {
+        let result = parse_simctl_devices(SAMPLE_SIMCTL_JSON).unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn parse_simctl_devices_sorted_by_name() {
+        let result = parse_simctl_devices(SAMPLE_SIMCTL_JSON).unwrap();
+        let names: Vec<&str> = result.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["iPad Pro 13-inch (M4)", "iPhone 16", "iPhone 16 Pro Max"]
+        );
+    }
+
+    #[test]
+    fn parse_simctl_devices_runtime_extracted() {
+        let result = parse_simctl_devices(SAMPLE_SIMCTL_JSON).unwrap();
+        let ipad = result.iter().find(|s| s.name.contains("iPad")).unwrap();
+        assert_eq!(ipad.runtime, "iOS.17.5");
+    }
+
+    #[test]
+    fn parse_simctl_devices_fields() {
+        let result = parse_simctl_devices(SAMPLE_SIMCTL_JSON).unwrap();
+        let booted = result.iter().find(|s| s.state == "Booted").unwrap();
+        assert_eq!(booted.name, "iPhone 16");
+        assert_eq!(booted.udid, "DDDD-EEEE-FFFF");
+    }
+
+    #[test]
+    fn parse_simctl_devices_empty() {
+        let json = r#"{"devices": {}}"#;
+        let result = parse_simctl_devices(json).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_simctl_devices_invalid_json() {
+        let result = parse_simctl_devices("not json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_simctl_devices_missing_devices_key() {
+        let result = parse_simctl_devices(r#"{"other": true}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn simulator_info_serialization() {
+        let info = SimulatorInfo {
+            name: "iPhone 16".into(),
+            udid: "ABC-123".into(),
+            state: "Booted".into(),
+            runtime: "iOS.18.0".into(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["name"], "iPhone 16");
+        assert_eq!(json["udid"], "ABC-123");
+        assert_eq!(json["state"], "Booted");
+        assert_eq!(json["runtime"], "iOS.18.0");
     }
 }

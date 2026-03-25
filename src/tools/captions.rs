@@ -7,7 +7,9 @@ use tokio::sync::Mutex;
 use crate::error::AppShotsError;
 use crate::io::FileStore;
 use crate::model::config::Caption;
+use crate::model::locale::AsoLocale;
 use crate::service::config_parser;
+use crate::service::keyword_matcher;
 
 use super::{CachedConfig, ProjectCache};
 
@@ -125,6 +127,155 @@ pub(crate) async fn handle_get_locale_keywords(
         "locale": locale,
         "keywords": content.trim(),
     }))
+}
+
+/// Coverage matrix entry for one locale x mode combination.
+#[derive(Debug, Serialize)]
+pub(crate) struct CoverageEntry {
+    pub locale: String,
+    pub mode: u8,
+    pub has_caption: bool,
+}
+
+/// Coverage matrix across all locales and modes.
+#[derive(Debug, Serialize)]
+pub(crate) struct CoverageMatrix {
+    pub locales: Vec<String>,
+    pub modes: Vec<u8>,
+    pub coverage: Vec<CoverageEntry>,
+    pub total_slots: usize,
+    pub filled_slots: usize,
+}
+
+/// Build a coverage matrix: for each locale x mode, check if caption exists.
+pub(crate) async fn handle_get_caption_coverage(
+    store: &dyn FileStore,
+    cache: &Mutex<ProjectCache>,
+    config_path: &Path,
+) -> Result<CoverageMatrix, AppShotsError> {
+    let config = super::resolve_config(store, cache, config_path).await?;
+
+    let all_captions: IndexMap<String, Vec<Caption>> = config
+        .extra
+        .get("captions")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    // Collect all modes from screen definitions
+    let modes: Vec<u8> = config.screens.iter().map(|s| s.mode).collect();
+
+    // Collect all locales that have any captions
+    let locales: Vec<String> = all_captions.keys().cloned().collect();
+
+    let mut coverage = Vec::new();
+    let mut filled = 0;
+
+    for locale in &locales {
+        let locale_caps = all_captions.get(locale);
+        for &mode in &modes {
+            let has_caption = locale_caps
+                .map(|caps| caps.iter().any(|c| c.mode == mode))
+                .unwrap_or(false);
+            if has_caption {
+                filled += 1;
+            }
+            coverage.push(CoverageEntry {
+                locale: locale.clone(),
+                mode,
+                has_caption,
+            });
+        }
+    }
+
+    let total_slots = locales.len() * modes.len();
+
+    Ok(CoverageMatrix {
+        locales,
+        modes,
+        coverage,
+        total_slots,
+        filled_slots: filled,
+    })
+}
+
+/// Review result for a single caption.
+#[derive(Debug, Serialize)]
+pub(crate) struct CaptionReview {
+    pub mode: u8,
+    pub locale: String,
+    pub keyword_coverage_percent: f64,
+    pub matched_keywords: Vec<String>,
+    pub gap_keywords: Vec<String>,
+}
+
+/// Review captions against keyword coverage.
+pub(crate) async fn handle_review_captions(
+    store: &dyn FileStore,
+    cache: &Mutex<ProjectCache>,
+    config_path: &Path,
+    project_dir: &Path,
+    locale: Option<&str>,
+    modes: Option<&[u8]>,
+) -> Result<serde_json::Value, AppShotsError> {
+    let config = super::resolve_config(store, cache, config_path).await?;
+
+    let all_captions: IndexMap<String, Vec<Caption>> = config
+        .extra
+        .get("captions")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let mut reviews: Vec<CaptionReview> = Vec::new();
+
+    for (loc_str, caps) in &all_captions {
+        if let Some(filter_locale) = locale
+            && loc_str != filter_locale
+        {
+            continue;
+        }
+
+        // Try to read keywords for this locale
+        let keywords_path = project_dir.join(format!("fastlane/metadata/{loc_str}/keywords.txt"));
+        let keywords: Vec<String> = if let Ok(content) = store.read(&keywords_path) {
+            content
+                .trim()
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let parsed_locale: AsoLocale = match loc_str.parse() {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        for caption in caps {
+            if let Some(mode_filter) = modes
+                && !mode_filter.contains(&caption.mode)
+            {
+                continue;
+            }
+
+            let report = keyword_matcher::coverage_report(
+                std::slice::from_ref(caption),
+                &keywords,
+                &parsed_locale,
+            );
+
+            reviews.push(CaptionReview {
+                mode: caption.mode,
+                locale: loc_str.clone(),
+                keyword_coverage_percent: report.coverage_percent,
+                matched_keywords: report.matches.iter().map(|m| m.keyword.clone()).collect(),
+                gap_keywords: report.gaps,
+            });
+        }
+    }
+
+    serde_json::to_value(&reviews).map_err(|e| AppShotsError::JsonParse(e.to_string()))
 }
 
 #[cfg(test)]
@@ -312,5 +463,163 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, AppShotsError::FileNotFound { .. }));
+    }
+
+    fn config_with_screens_and_captions() -> &'static str {
+        r#"{
+            "bundleId": "com.example.app",
+            "screens": [
+                {"mode": 1, "name": "Home"},
+                {"mode": 2, "name": "Settings"},
+                {"mode": 3, "name": "Stats"}
+            ],
+            "templateMode": "single",
+            "devices": ["iPhone 6.9\""],
+            "captions": {
+                "en-US": [
+                    {"mode": 1, "title": "Track Glucose Levels", "keyword": "glucose"},
+                    {"mode": 2, "title": "Custom Settings"}
+                ],
+                "de-DE": [
+                    {"mode": 1, "title": "Blutzucker verfolgen"}
+                ]
+            }
+        }"#
+    }
+
+    #[tokio::test]
+    async fn coverage_matrix_basic() {
+        let store = MemoryStore::new();
+        let config_path = Path::new("/project/appshots.json");
+        store
+            .write(config_path, config_with_screens_and_captions())
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let result = handle_get_caption_coverage(&store, &cache, config_path)
+            .await
+            .unwrap();
+
+        assert_eq!(result.modes, vec![1, 2, 3]);
+        assert_eq!(result.locales.len(), 2);
+        // en-US has modes 1,2 filled; de-DE has mode 1 filled
+        assert_eq!(result.filled_slots, 3);
+        assert_eq!(result.total_slots, 6); // 2 locales * 3 modes
+    }
+
+    #[tokio::test]
+    async fn coverage_matrix_empty_captions() {
+        let (store, cache, _) = setup();
+        let config_path = Path::new("/project/appshots.json");
+
+        let result = handle_get_caption_coverage(&store, &cache, config_path)
+            .await
+            .unwrap();
+        assert!(result.locales.is_empty());
+        assert_eq!(result.filled_slots, 0);
+    }
+
+    #[tokio::test]
+    async fn review_captions_with_keywords() {
+        let store = MemoryStore::new();
+        let config_path = Path::new("/project/appshots.json");
+        let project_dir = Path::new("/project");
+        store
+            .write(config_path, config_with_screens_and_captions())
+            .unwrap();
+
+        // Write keywords
+        store
+            .write(
+                &project_dir.join("fastlane/metadata/en-US/keywords.txt"),
+                "glucose,blood sugar,tracker,health",
+            )
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let result = handle_review_captions(
+            &store,
+            &cache,
+            config_path,
+            project_dir,
+            Some("en-US"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let reviews = result.as_array().unwrap();
+        assert_eq!(reviews.len(), 2); // 2 captions for en-US
+
+        // First caption has "glucose" in title and keyword field
+        let first = &reviews[0];
+        assert_eq!(first["mode"], 1);
+        assert!(
+            first["matched_keywords"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|k| k == "glucose")
+        );
+    }
+
+    #[tokio::test]
+    async fn review_captions_with_mode_filter() {
+        let store = MemoryStore::new();
+        let config_path = Path::new("/project/appshots.json");
+        let project_dir = Path::new("/project");
+        store
+            .write(config_path, config_with_screens_and_captions())
+            .unwrap();
+        store
+            .write(
+                &project_dir.join("fastlane/metadata/en-US/keywords.txt"),
+                "glucose",
+            )
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let result = handle_review_captions(
+            &store,
+            &cache,
+            config_path,
+            project_dir,
+            Some("en-US"),
+            Some(&[1]),
+        )
+        .await
+        .unwrap();
+
+        let reviews = result.as_array().unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0]["mode"], 1);
+    }
+
+    #[tokio::test]
+    async fn review_captions_no_keywords_file() {
+        let store = MemoryStore::new();
+        let config_path = Path::new("/project/appshots.json");
+        let project_dir = Path::new("/project");
+        store
+            .write(config_path, config_with_screens_and_captions())
+            .unwrap();
+
+        let cache = Mutex::new(ProjectCache::new());
+        let result = handle_review_captions(
+            &store,
+            &cache,
+            config_path,
+            project_dir,
+            Some("en-US"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let reviews = result.as_array().unwrap();
+        // With no keywords, coverage should be 100% (no keywords to match)
+        for review in reviews {
+            assert_eq!(review["keyword_coverage_percent"], 100.0);
+        }
     }
 }

@@ -7,8 +7,8 @@ use crate::io::FileStore;
 use crate::model::color::OklchColor;
 use crate::model::device::Device;
 use crate::model::locale::AsoLocale;
-use crate::service::template_resolver;
 use crate::service::typst_renderer::{RenderParams, RenderResult};
+use crate::service::{font_resolver, template_resolver};
 
 /// Input parameters for preview_design.
 pub struct PreviewParams<'a> {
@@ -85,6 +85,82 @@ pub(crate) async fn handle_preview_design(
         width,
         height,
         warnings,
+    })
+}
+
+/// Save a Typst template to disk.
+///
+/// - `mode: None` → save to `appshots/template.typ` (single template)
+/// - `mode: Some(N)` → save to `appshots/templates/template-{N}.typ` (per-screen)
+pub(crate) async fn handle_save_template(
+    store: &dyn FileStore,
+    project_dir: &Path,
+    template_source: &str,
+    mode: Option<u8>,
+) -> Result<serde_json::Value, AppShotsError> {
+    let appshots_dir = project_dir.join("appshots");
+
+    let template_path = match mode {
+        None => appshots_dir.join("template.typ"),
+        Some(m) => appshots_dir.join(format!("templates/template-{m}.typ")),
+    };
+
+    store.create_parent_dirs(&template_path)?;
+    store.write(&template_path, template_source)?;
+
+    Ok(serde_json::json!({
+        "saved": template_path.to_string_lossy(),
+        "mode": mode,
+        "bytes": template_source.len(),
+    }))
+}
+
+/// Read a template from disk.
+///
+/// - `mode: None` → read `appshots/template.typ`
+/// - `mode: Some(N)` → resolve via template_resolver (mode-specific → shared → root)
+pub(crate) async fn handle_get_template(
+    store: &dyn FileStore,
+    project_dir: &Path,
+    mode: Option<u8>,
+) -> Result<serde_json::Value, AppShotsError> {
+    let appshots_dir = project_dir.join("appshots");
+    let base_dir = appshots_dir
+        .to_str()
+        .ok_or_else(|| AppShotsError::InvalidPath {
+            path: appshots_dir.clone(),
+            reason: "non-UTF-8 path".into(),
+        })?;
+
+    let (path, source_desc) = match mode {
+        None => {
+            let p = appshots_dir.join("template.typ");
+            (p, "single".to_owned())
+        }
+        Some(m) => {
+            let resolved = template_resolver::resolve_template(base_dir, m, |path| {
+                store.exists(Path::new(path))
+            })?;
+            let desc = format!("{:?}", resolved.source);
+            (resolved.resolved, desc)
+        }
+    };
+
+    let content = store.read(&path)?;
+
+    Ok(serde_json::json!({
+        "path": path.to_string_lossy(),
+        "source": source_desc,
+        "content": content,
+    }))
+}
+
+/// Suggest a system font for a locale's script.
+pub(crate) fn handle_suggest_font(locale: &AsoLocale) -> serde_json::Value {
+    serde_json::json!({
+        "locale": locale.code(),
+        "script": format!("{:?}", locale.script()),
+        "suggested_font": font_resolver::suggest_system_font(locale),
     })
 }
 
@@ -215,5 +291,109 @@ Mode 2"#,
         assert!(result.is_ok(), "preview failed: {:?}", result.err());
         let result = result.unwrap();
         assert!(result.preview_path.contains("fr-FR"));
+    }
+
+    // --- save_template / get_template tests ---
+
+    #[tokio::test]
+    async fn save_and_get_template_roundtrip_single() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+        let source = "#set page(width: 440pt, height: 956pt)\nHello";
+
+        let save_result = handle_save_template(&store, &project_dir, source, None)
+            .await
+            .unwrap();
+        assert!(
+            save_result["saved"]
+                .as_str()
+                .unwrap()
+                .contains("template.typ")
+        );
+
+        let get_result = handle_get_template(&store, &project_dir, None)
+            .await
+            .unwrap();
+        assert_eq!(get_result["content"].as_str().unwrap(), source);
+        assert_eq!(get_result["source"].as_str().unwrap(), "single");
+    }
+
+    #[tokio::test]
+    async fn save_and_get_template_per_screen() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+        let source = "#set page()\nMode 3 template";
+
+        handle_save_template(&store, &project_dir, source, Some(3))
+            .await
+            .unwrap();
+
+        let result = handle_get_template(&store, &project_dir, Some(3))
+            .await
+            .unwrap();
+        assert_eq!(result["content"].as_str().unwrap(), source);
+        assert!(result["path"].as_str().unwrap().contains("template-3.typ"));
+    }
+
+    #[tokio::test]
+    async fn get_template_not_found() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+
+        let result = handle_get_template(&store, &project_dir, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_template_mode_fallback() {
+        let store = MemoryStore::new();
+        let project_dir = PathBuf::from("/project");
+
+        // Only save root template
+        let source = "root fallback";
+        handle_save_template(&store, &project_dir, source, None)
+            .await
+            .unwrap();
+
+        // Request mode 5 — should fall back to root
+        let result = handle_get_template(&store, &project_dir, Some(5))
+            .await
+            .unwrap();
+        assert_eq!(result["content"].as_str().unwrap(), source);
+    }
+
+    // --- suggest_font tests ---
+
+    #[test]
+    fn suggest_font_latin() {
+        let result = handle_suggest_font(&AsoLocale::EnUs);
+        assert_eq!(result["suggested_font"], "SF Pro Display");
+        assert_eq!(result["locale"], "en-US");
+        assert_eq!(result["script"], "Latin");
+    }
+
+    #[test]
+    fn suggest_font_cjk_japanese() {
+        let result = handle_suggest_font(&AsoLocale::Ja);
+        assert_eq!(result["suggested_font"], "Hiragino Sans");
+        assert_eq!(result["script"], "CJK");
+    }
+
+    #[test]
+    fn suggest_font_arabic() {
+        let result = handle_suggest_font(&AsoLocale::ArSa);
+        assert_eq!(result["suggested_font"], "SF Arabic");
+        assert_eq!(result["script"], "Arabic");
+    }
+
+    #[test]
+    fn suggest_font_all_scripts_return_value() {
+        // Verify no panic for all locales
+        for locale in crate::model::locale::ALL {
+            let result = handle_suggest_font(locale);
+            assert!(result["suggested_font"].is_string());
+            assert!(result["locale"].is_string());
+            assert!(result["script"].is_string());
+        }
     }
 }
