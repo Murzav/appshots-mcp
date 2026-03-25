@@ -153,7 +153,7 @@ pub(crate) async fn handle_compose_screenshots(
                     extra_fonts: vec![],
                 };
 
-                let result = typst_renderer::render_screenshot(&params)?;
+                let result = typst_renderer::render_screenshot_async(&params).await?;
 
                 // Save to fastlane/screenshots/{locale}/{mode}_{device}.png
                 let locale_dir = screenshots_base.join(locale.code());

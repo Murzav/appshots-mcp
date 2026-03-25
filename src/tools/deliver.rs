@@ -1,16 +1,21 @@
 use std::path::Path;
+use std::time::Duration;
 
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::error::AppShotsError;
+
+/// Timeout for fastlane deliver (may upload many screenshots).
+const DELIVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Run `fastlane deliver` to upload screenshots.
 pub(crate) async fn handle_run_deliver(
     project_dir: &Path,
 ) -> Result<serde_json::Value, AppShotsError> {
-    let output = build_deliver_command(project_dir)
-        .output()
+    let output = timeout(DELIVER_TIMEOUT, build_deliver_command(project_dir).output())
         .await
+        .map_err(|_| AppShotsError::DeliverError("fastlane deliver timed out after 600s".into()))?
         .map_err(|e| AppShotsError::DeliverError(format!("failed to run fastlane deliver: {e}")))?;
 
     if !output.status.success() {

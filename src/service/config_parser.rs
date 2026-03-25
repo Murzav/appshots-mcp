@@ -11,10 +11,21 @@ pub fn serialize_config(config: &ProjectConfig) -> Result<String, AppShotsError>
     serde_json::to_string_pretty(config).map_err(|e| AppShotsError::JsonParse(e.to_string()))
 }
 
-/// Validate a ProjectConfig: check required fields and OKLCH colors.
+/// Validate a ProjectConfig: check required fields, duplicate modes, and OKLCH colors.
 pub fn validate_config(config: &ProjectConfig) -> Result<(), AppShotsError> {
     if config.bundle_id.is_empty() {
         return Err(AppShotsError::InvalidFormat("bundle_id is required".into()));
+    }
+
+    // Check for duplicate screen modes
+    let mut seen_modes = std::collections::HashSet::new();
+    for screen in &config.screens {
+        if !seen_modes.insert(screen.mode) {
+            return Err(AppShotsError::InvalidFormat(format!(
+                "duplicate screen mode: {}",
+                screen.mode
+            )));
+        }
     }
 
     // Validate OKLCH colors in per_screen_overrides
@@ -98,6 +109,28 @@ mod tests {
         };
         let err = validate_config(&config).unwrap_err();
         assert!(matches!(err, AppShotsError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn validate_config_duplicate_modes() {
+        let config = ProjectConfig {
+            screens: vec![
+                crate::model::config::ScreenConfig {
+                    mode: 1,
+                    name: "Home".into(),
+                    description: None,
+                },
+                crate::model::config::ScreenConfig {
+                    mode: 1,
+                    name: "Home Copy".into(),
+                    description: None,
+                },
+            ],
+            ..minimal_config()
+        };
+        let err = validate_config(&config).unwrap_err();
+        assert!(matches!(err, AppShotsError::InvalidFormat(_)));
+        assert!(err.to_string().contains("duplicate screen mode: 1"));
     }
 
     #[test]

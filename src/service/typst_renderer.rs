@@ -7,7 +7,9 @@ use crate::model::color::OklchColor;
 use crate::model::device::Device;
 use crate::model::locale::AsoLocale;
 use crate::service::locale::text_direction;
-use crate::service::typst_world::{AppWorld, compile_template};
+use crate::service::typst_world::{
+    AppWorld, COMPILE_TIMEOUT, compile_template, compile_template_with_timeout,
+};
 
 /// Parameters for rendering a single screenshot.
 pub struct RenderParams {
@@ -127,6 +129,59 @@ pub fn render_screenshot(params: &RenderParams) -> Result<RenderResult, AppShots
     let page_size = page.frame.size();
 
     // Calculate pixel_per_pt to match target device size
+    let (target_w, _target_h) = params.device.canvas_size();
+    let page_width_pt = page_size.x.to_pt() as f32;
+    let pixel_per_pt = if page_width_pt > 0.0 {
+        target_w as f32 / page_width_pt
+    } else {
+        2.0
+    };
+
+    let pixmap = typst_render::render(page, pixel_per_pt);
+    let width = pixmap.width();
+    let height = pixmap.height();
+
+    let png_bytes = pixmap
+        .encode_png()
+        .map_err(|e| AppShotsError::RenderError(format!("PNG encoding failed: {e}")))?;
+
+    Ok(RenderResult {
+        png_bytes,
+        width,
+        height,
+        warnings,
+    })
+}
+
+/// Render a screenshot template to PNG bytes, with a compilation timeout.
+///
+/// Use this from async tool handlers to prevent infinite-loop templates
+/// from hanging the server.
+pub async fn render_screenshot_async(params: &RenderParams) -> Result<RenderResult, AppShotsError> {
+    let inputs = build_inputs(params);
+
+    let mut files = HashMap::new();
+    if let Some(ref data) = params.screenshot_data {
+        files.insert("/screenshot.png".to_owned(), data.clone());
+    }
+
+    let world = AppWorld::new(
+        &params.template_source,
+        inputs,
+        params.extra_fonts.clone(),
+        files,
+    );
+    let (document, warnings) = compile_template_with_timeout(world, COMPILE_TIMEOUT).await?;
+
+    if document.pages.is_empty() {
+        return Err(AppShotsError::RenderError(
+            "template produced no pages".into(),
+        ));
+    }
+
+    let page = &document.pages[0];
+    let page_size = page.frame.size();
+
     let (target_w, _target_h) = params.device.canvas_size();
     let page_width_pt = page_size.x.to_pt() as f32;
     let pixel_per_pt = if page_width_pt > 0.0 {

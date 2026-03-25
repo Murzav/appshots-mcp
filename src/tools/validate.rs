@@ -85,7 +85,7 @@ pub(crate) async fn handle_validate_layout(
                     extra_fonts: vec![],
                 };
 
-                let issues = validator::validate_layout(&template_source, &params);
+                let issues = validator::validate_layout_async(&template_source, &params).await;
                 for issue in issues {
                     all_issues.push(ValidateIssueInfo {
                         mode,

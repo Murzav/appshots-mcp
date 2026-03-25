@@ -70,7 +70,7 @@ pub(crate) async fn handle_preview_design(
         width,
         height,
         warnings,
-    } = crate::service::typst_renderer::render_screenshot(&render_params)?;
+    } = crate::service::typst_renderer::render_screenshot_async(&render_params).await?;
 
     // Save preview
     let preview_dir = appshots_dir.join("previews");

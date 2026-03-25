@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use typst::diag::Severity;
 use typst::layout::PagedDocument;
 
 use crate::service::typst_renderer::{RenderParams, build_inputs};
-use crate::service::typst_world::AppWorld;
+use crate::service::typst_world::{AppWorld, COMPILE_TIMEOUT};
 
 /// Severity of a validation issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,76 @@ pub fn validate_layout(template_source: &str, params: &RenderParams) -> Vec<Vali
     }
 
     // Collect errors
+    if let Err(errors) = &warned.output {
+        for e in errors.iter() {
+            let severity = match e.severity {
+                Severity::Error => IssueSeverity::Error,
+                Severity::Warning => IssueSeverity::Warning,
+            };
+            issues.push(ValidationIssue {
+                severity,
+                message: e.message.to_string(),
+            });
+        }
+    }
+
+    issues
+}
+
+/// Async version of `validate_layout` with a compilation timeout.
+///
+/// Runs the Typst compilation on a dedicated thread. If compilation
+/// exceeds `COMPILE_TIMEOUT`, returns a single error issue.
+pub async fn validate_layout_async(
+    template_source: &str,
+    params: &RenderParams,
+) -> Vec<ValidationIssue> {
+    validate_layout_with_timeout(template_source, params, COMPILE_TIMEOUT).await
+}
+
+async fn validate_layout_with_timeout(
+    template_source: &str,
+    params: &RenderParams,
+    timeout: Duration,
+) -> Vec<ValidationIssue> {
+    let inputs = build_inputs(params);
+
+    let mut files = HashMap::new();
+    if let Some(ref data) = params.screenshot_data {
+        files.insert("/screenshot.png".to_owned(), data.clone());
+    }
+
+    let world = AppWorld::new(template_source, inputs, params.extra_fonts.clone(), files);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let warned = typst::compile::<PagedDocument>(&world);
+        let _ = tx.send(warned);
+    });
+
+    let warned = match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(warned)) => warned,
+        Ok(Err(_)) => {
+            return vec![ValidationIssue {
+                severity: IssueSeverity::Error,
+                message: "validation thread panicked".into(),
+            }];
+        }
+        Err(_) => {
+            return vec![ValidationIssue {
+                severity: IssueSeverity::Error,
+                message: format!("compilation timed out after {}s", timeout.as_secs()),
+            }];
+        }
+    };
+
+    let mut issues = Vec::new();
+    for w in &warned.warnings {
+        issues.push(ValidationIssue {
+            severity: IssueSeverity::Warning,
+            message: w.message.to_string(),
+        });
+    }
     if let Err(errors) = &warned.output {
         for e in errors.iter() {
             let severity = match e.severity {

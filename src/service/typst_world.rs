@@ -9,7 +9,12 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
+use std::time::Duration;
+
 use crate::error::AppShotsError;
+
+/// Default timeout for Typst template compilation.
+pub(crate) const COMPILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Cached bundled fonts — parsed once, reused across all renders.
 fn bundled_fonts() -> &'static [Font] {
@@ -154,6 +159,34 @@ pub(crate) fn compile_template(
     }
 }
 
+/// Compile a template with a timeout, running on a dedicated thread.
+///
+/// `AppWorld` is `Send`, so we move it into a spawned thread.
+/// If compilation exceeds `timeout`, the caller gets an error
+/// (the orphaned thread will still run to completion, but the result is discarded).
+pub(crate) async fn compile_template_with_timeout(
+    world: AppWorld,
+    timeout: Duration,
+) -> Result<(PagedDocument, Vec<String>), AppShotsError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    std::thread::spawn(move || {
+        let result = compile_template(&world);
+        let _ = tx.send(result);
+    });
+
+    match tokio::time::timeout(timeout, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(AppShotsError::TemplateCompileError(
+            "compilation thread panicked".into(),
+        )),
+        Err(_) => Err(AppShotsError::TemplateCompileError(format!(
+            "compilation timed out after {}s",
+            timeout.as_secs()
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use typst::foundations::{IntoValue, Str};
@@ -241,5 +274,25 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(matches!(err, AppShotsError::TemplateCompileError(_)));
+    }
+
+    #[tokio::test]
+    async fn compile_with_timeout_succeeds() {
+        let world = AppWorld::new("Hello, world!", empty_inputs(), vec![], HashMap::new());
+        let result = compile_template_with_timeout(world, Duration::from_secs(10)).await;
+        assert!(result.is_ok());
+        let (doc, _warnings) = result.unwrap();
+        assert!(!doc.pages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compile_with_timeout_returns_error_on_invalid_template() {
+        let world = AppWorld::new("#invalid-syntax(", empty_inputs(), vec![], HashMap::new());
+        let result = compile_template_with_timeout(world, Duration::from_secs(10)).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AppShotsError::TemplateCompileError(_)
+        ));
     }
 }

@@ -1,10 +1,15 @@
 use std::path::Path;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio::process::Command;
+use tokio::time::timeout;
 
 use crate::error::AppShotsError;
 use crate::io::FileStore;
+
+/// Timeout for external simulator/capture commands.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Serialize)]
 pub struct CaptureResult {
@@ -71,9 +76,11 @@ pub(crate) async fn handle_capture_screenshots(
         for &mode in &target_modes {
             // Launch app in screenshot mode
             let mut launch_cmd = build_launch_command(bundle_id, mode);
-            let launch_output = launch_cmd
-                .output()
+            let launch_output = timeout(COMMAND_TIMEOUT, launch_cmd.output())
                 .await
+                .map_err(|_| {
+                    AppShotsError::SimulatorError("simctl launch timed out after 60s".into())
+                })?
                 .map_err(|e| AppShotsError::SimulatorError(format!("failed to launch app: {e}")))?;
 
             if !launch_output.status.success() {
@@ -97,9 +104,11 @@ pub(crate) async fn handle_capture_screenshots(
             let output_path_str = output_path.to_string_lossy().to_string();
 
             let mut capture_cmd = build_capture_command(window_id, &output_path_str);
-            let capture_output = capture_cmd
-                .output()
+            let capture_output = timeout(COMMAND_TIMEOUT, capture_cmd.output())
                 .await
+                .map_err(|_| {
+                    AppShotsError::CaptureError("screencapture timed out after 60s".into())
+                })?
                 .map_err(|e| AppShotsError::CaptureError(format!("screencapture failed: {e}")))?;
 
             if !capture_output.status.success() {
@@ -126,11 +135,15 @@ pub(crate) async fn handle_capture_screenshots(
 
 /// Find the Simulator.app window ID via `xcrun simctl list windows`.
 async fn find_simulator_window_id() -> Result<u32, AppShotsError> {
-    let output = Command::new("xcrun")
-        .args(["simctl", "list", "windows", "booted"])
-        .output()
-        .await
-        .map_err(|e| AppShotsError::SimulatorError(format!("failed to list windows: {e}")))?;
+    let output = timeout(
+        COMMAND_TIMEOUT,
+        Command::new("xcrun")
+            .args(["simctl", "list", "windows", "booted"])
+            .output(),
+    )
+    .await
+    .map_err(|_| AppShotsError::SimulatorError("simctl list windows timed out after 60s".into()))?
+    .map_err(|e| AppShotsError::SimulatorError(format!("failed to list windows: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -168,11 +181,15 @@ pub(crate) struct SimulatorInfo {
 
 /// List available iOS simulators via `xcrun simctl list devices -j`.
 pub(crate) async fn handle_list_simulators() -> Result<Vec<SimulatorInfo>, AppShotsError> {
-    let output = Command::new("xcrun")
-        .args(["simctl", "list", "devices", "-j"])
-        .output()
-        .await
-        .map_err(|e| AppShotsError::SimulatorError(format!("failed to list simulators: {e}")))?;
+    let output = timeout(
+        COMMAND_TIMEOUT,
+        Command::new("xcrun")
+            .args(["simctl", "list", "devices", "-j"])
+            .output(),
+    )
+    .await
+    .map_err(|_| AppShotsError::SimulatorError("simctl list devices timed out after 60s".into()))?
+    .map_err(|e| AppShotsError::SimulatorError(format!("failed to list simulators: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
