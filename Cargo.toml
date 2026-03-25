@@ -44,3 +44,6 @@ tokio-test = "0.4"
 strip = true
 lto = true
 codegen-units = 1
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"

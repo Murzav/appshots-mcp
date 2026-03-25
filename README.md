@@ -1,8 +1,10 @@
 # appshots-mcp
 
 [![CI](https://github.com/Murzav/appshots-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Murzav/appshots-mcp/actions/workflows/ci.yml)
-[![MSRV 1.90](https://img.shields.io/badge/MSRV-1.90-blue)](https://blog.rust-lang.org/)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](#license)
+[![Crates.io](https://img.shields.io/crates/v/appshots-mcp)](https://crates.io/crates/appshots-mcp)
+[![Downloads](https://img.shields.io/crates/d/appshots-mcp)](https://crates.io/crates/appshots-mcp)
+[![MSRV](https://img.shields.io/badge/MSRV-1.90-blue)](https://blog.rust-lang.org/)
+[![License](https://img.shields.io/crates/l/appshots-mcp)](LICENSE-MIT)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green)](https://modelcontextprotocol.io)
 
 MCP server for generating ASO-optimized App Store screenshots. Generates up to **780 final images** per app (39 locales x 5-10 screenshots x 1-2 devices).
@@ -38,8 +40,19 @@ AI logic lives in Claude Code; the server provides tools, rendering, and validat
 
 ### Installation
 
+**Homebrew (macOS/Linux):**
+```bash
+brew install Murzav/tap/appshots-mcp
+```
+
+**Cargo:**
 ```bash
 cargo install appshots-mcp
+```
+
+**cargo-binstall (prebuilt binary):**
+```bash
+cargo binstall appshots-mcp
 ```
 
 ### Configuration

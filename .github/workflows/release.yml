@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../appshots-mcp-${{ matrix.target }}.tar.gz appshots-mcp
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: appshots-mcp-${{ matrix.target }}
+          path: appshots-mcp-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          merge-multiple: true
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release notes
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            NOTES=$(sed -n "/^## \[${VERSION}\]/,/^## \[/p" CHANGELOG.md | sed '1d;$d')
+            if [ -n "$NOTES" ]; then
+              {
+                echo "notes<<NOTES_EOF"
+                echo "$NOTES"
+                echo "NOTES_EOF"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | sed -n '2p')
+          if [ -n "$PREV_TAG" ]; then
+            {
+              echo "notes<<NOTES_EOF"
+              echo "## What's Changed"
+              echo ""
+              git log "${PREV_TAG}..HEAD" --pretty=format:"- %s" --no-merges
+              echo ""
+              echo ""
+              echo "**Full Changelog**: https://github.com/Murzav/appshots-mcp/compare/${PREV_TAG}...v${VERSION}"
+              echo "NOTES_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "notes=Initial release" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.notes }}
+          generate_release_notes: false
+          files: appshots-mcp-*.tar.gz
+
+  publish:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  homebrew:
+    name: Update Homebrew formula
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute SHA256 hashes
+        id: sha
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            curl -sL "https://github.com/Murzav/appshots-mcp/releases/download/${TAG_NAME}/appshots-mcp-${target}.tar.gz" -o "${target}.tar.gz"
+            sha=$(sha256sum "${target}.tar.gz" | cut -d' ' -f1)
+            key=$(echo "${target}" | tr '-' '_')
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Checkout homebrew-tap
+        uses: actions/checkout@v6
+        with:
+          repository: Murzav/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Generate formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA_MACOS_ARM: ${{ steps.sha.outputs.aarch64_apple_darwin }}
+          SHA_MACOS_X64: ${{ steps.sha.outputs.x86_64_apple_darwin }}
+          SHA_LINUX_ARM: ${{ steps.sha.outputs.aarch64_unknown_linux_gnu }}
+          SHA_LINUX_X64: ${{ steps.sha.outputs.x86_64_unknown_linux_gnu }}
+        run: |
+          mkdir -p Formula
+          cat > Formula/appshots-mcp.rb << FORMULA_EOF
+          class AppshotsMcp < Formula
+            desc "MCP server for generating ASO-optimized App Store screenshots"
+            homepage "https://github.com/Murzav/appshots-mcp"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/Murzav/appshots-mcp/releases/download/v#{version}/appshots-mcp-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_MACOS_ARM}"
+              else
+                url "https://github.com/Murzav/appshots-mcp/releases/download/v#{version}/appshots-mcp-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_MACOS_X64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/Murzav/appshots-mcp/releases/download/v#{version}/appshots-mcp-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_ARM}"
+              else
+                url "https://github.com/Murzav/appshots-mcp/releases/download/v#{version}/appshots-mcp-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_LINUX_X64}"
+              end
+            end
+
+            def install
+              bin.install "appshots-mcp"
+            end
+
+            test do
+              assert_match "appshots-mcp", shell_output("#{bin}/appshots-mcp --help 2>&1")
+            end
+          end
+          FORMULA_EOF
+          sed -i 's/^          //' Formula/appshots-mcp.rb
+
+      - name: Commit and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/appshots-mcp.rb
+          git diff --cached --quiet && echo "No changes" || (git commit -m "Update appshots-mcp to ${VERSION}" && git push)

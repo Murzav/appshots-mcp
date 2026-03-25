@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (${{ matrix.rust }} / ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ["1.90.0", stable, nightly]
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Tests
+        run: cargo nextest run
+
+      - name: Doctests
+        run: cargo test --doc
+
+      - name: Doc build
+        run: cargo doc --no-deps
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
+
+      - name: Generate coverage
+        run: cargo llvm-cov nextest --json --output-path coverage.json
+
+      - name: Extract coverage percentage
+        id: cov
+        run: |
+          PCT=$(python3 -c "import json; d=json.load(open('coverage.json')); print(f\"{d['data'][0]['totals']['lines']['percent']:.1f}\")")
+          echo "percent=$PCT" >> "$GITHUB_OUTPUT"
+          echo "Coverage: $PCT%"
+
+      - name: Update coverage badge
+        if: github.ref == 'refs/heads/master'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: coverage.json
+          label: coverage
+          message: "${{ steps.cov.outputs.percent }}%"
+          valColorRange: ${{ steps.cov.outputs.percent }}
+          maxColorRange: 100
+          minColorRange: 0
