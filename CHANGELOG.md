@@ -39,5 +39,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keyword matching: Unicode-aware (word boundary for Latin, substring for CJK)
 - 333 tests, 93%+ coverage
 
-[0.2.0]: https://github.com/nicklama/appshots-mcp/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/nicklama/appshots-mcp/releases/tag/v0.1.0
+[0.2.0]: https://github.com/Murzav/appshots-mcp/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/Murzav/appshots-mcp/releases/tag/v0.1.0

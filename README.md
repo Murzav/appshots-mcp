@@ -1,6 +1,6 @@
 # appshots-mcp
 
-[![CI](https://github.com/nicklama/appshots-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/nicklama/appshots-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/Murzav/appshots-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Murzav/appshots-mcp/actions/workflows/ci.yml)
 [![MSRV 1.90](https://img.shields.io/badge/MSRV-1.90-blue)](https://blog.rust-lang.org/)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](#license)
 [![MCP](https://img.shields.io/badge/MCP-compatible-green)](https://modelcontextprotocol.io)
@@ -206,7 +206,7 @@ prompts.rs  → prompt content generators
 ## Related
 
 - [MCP Protocol](https://modelcontextprotocol.io) — Model Context Protocol specification
-- [xcstrings-mcp](https://github.com/nicklama/xcstrings-mcp) — Sister project for .xcstrings localization
+- [xcstrings-mcp](https://github.com/Murzav/xcstrings-mcp) — Sister project for .xcstrings localization
 - [Typst](https://typst.app) — The typesetting system used for rendering
 - [fastlane](https://fastlane.tools) — App Store automation
 
