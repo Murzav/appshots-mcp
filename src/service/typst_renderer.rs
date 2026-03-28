@@ -97,6 +97,14 @@ pub(crate) fn build_inputs(params: &RenderParams) -> Dict {
         Str::from(text_direction(&params.locale)).into_value(),
     );
 
+    // Screenshot path (set when capture data is provided as virtual file)
+    if params.screenshot_data.is_some() {
+        inputs.insert(
+            "screenshot_path".into(),
+            Str::from("/screenshot.png").into_value(),
+        );
+    }
+
     inputs
 }
 
@@ -343,5 +351,33 @@ Hello"#,
         assert!(inputs.get(&Str::from("device_height")).is_ok());
         assert!(inputs.get(&Str::from("locale")).is_ok());
         assert!(inputs.get(&Str::from("text_direction")).is_ok());
+    }
+
+    #[test]
+    fn build_inputs_includes_screenshot_path_when_data_present() {
+        let params = RenderParams {
+            template_source: String::new(),
+            caption_title: "Title".to_owned(),
+            caption_subtitle: None,
+            keyword: None,
+            bg_colors: vec![],
+            device: Device::Iphone6_9,
+            locale: AsoLocale::EnUs,
+            screenshot_data: Some(vec![1, 2, 3]),
+            extra_fonts: vec![],
+        };
+        let inputs = build_inputs(&params);
+        let val = inputs.get(&Str::from("screenshot_path")).unwrap();
+        assert_eq!(
+            val.clone().cast::<Str>().unwrap().as_str(),
+            "/screenshot.png"
+        );
+    }
+
+    #[test]
+    fn build_inputs_excludes_screenshot_path_when_no_data() {
+        let params = minimal_params("");
+        let inputs = build_inputs(&params);
+        assert!(inputs.get(&Str::from("screenshot_path")).is_err());
     }
 }

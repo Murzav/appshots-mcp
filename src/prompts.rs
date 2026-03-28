@@ -88,6 +88,8 @@ The data must look REALISTIC — use plausible names, dates, numbers. Screenshot
 
 ## Step 4 — Wire launch argument handling
 
+### Option A — Launch arguments (simple boolean states)
+
 In the app's entry point (AppDelegate or @main App struct), add:
 
 ```swift
@@ -104,6 +106,38 @@ private func handleScreenshotMode() {{
 }}
 #endif
 ```
+
+### Option B — Seed data via `seed_defaults` tool
+
+For complex app state (charts, history, achievements), pre-populate UserDefaults
+BEFORE launching the app using the `seed_defaults` MCP tool:
+
+```
+seed_defaults(bundle_id: "com.app", data: {{
+  "streak_count": 7,
+  "total_photos_deleted": 847,
+  "is_pro_user": true
+}})
+```
+
+Behind the scenes, this runs `xcrun simctl spawn booted defaults import` with an XML plist.
+
+Your app reads the data normally from `UserDefaults.standard`.
+
+**IMPORTANT — Date encoding:**
+Swift `JSONEncoder` encodes `Date` as `Double` — seconds since reference date (1 Jan 2001),
+NOT as an ISO 8601 string. If you store Date-typed values, pass them as Double:
+```swift
+// Swift: date.timeIntervalSinceReferenceDate → e.g. 796435200.0
+```
+
+**Seed timing:** seed AFTER app install, BEFORE app launch.
+
+### Mechanism note
+
+- `capture_screenshots` passes `--screenshot-N` as a **launch argument** (NOT an environment variable).
+- Do NOT confuse with the `SIMCTL_CHILD_` prefix — that is for environment variables and is NOT used by this tool.
+- Your app reads the mode via `ProcessInfo.processInfo.arguments`.
 
 ## Step 5 — Update appshots.json
 
@@ -317,6 +351,46 @@ ALL colors MUST use `oklch(L%, C, Hdeg)` notation. No hex. No RGB. No HSL. EVER.
 
 ---
 
+# DEVICE FRAME COMPOSITING
+
+`compose_screenshots` injects the captured screenshot as a virtual file at `/screenshot.png`. Templates access it via `image("/screenshot.png")`, NOT through `sys.inputs`.
+
+The `screenshot_path` input (`sys.inputs.at("screenshot_path", default: none)`) tells the template whether a capture exists. When present, its value is `"/screenshot.png"`.
+
+Three approaches for displaying the device screenshot:
+
+**A) Raw screenshot** — simplest, no frame:
+```typst
+#if screenshot-path != none {{
+  place(bottom + center, dy: 30pt, image(screenshot-path, width: 85%))
+}}
+```
+
+**B) Rounded card** (recommended default — no external files needed):
+```typst
+#if screenshot-path != none {{
+  place(bottom + center, dy: 30pt,
+    box(clip: true, radius: 34pt,
+      image(screenshot-path, width: 85%)))
+}}
+```
+
+**C) Device frame PNG overlay** — layer screenshot behind a transparent device frame image:
+```typst
+#if screenshot-path != none {{
+  place(bottom + center, dy: 30pt)[
+    #box(width: 85%)[
+      #image(screenshot-path, width: 100%)
+      #place(top + center, image("device-frame.png", width: 100%))
+    ]
+  ]
+}}
+```
+
+Approach B is recommended as the default — it produces a polished look without requiring external device frame assets.
+
+---
+
 # LOCALE & SCRIPT SUPPORT
 
 The template must render correctly for all 39 App Store locales:
@@ -482,14 +556,27 @@ Re-run validation after fixes until all checks pass.
 
 ---
 
+## Optional: Prepare simulator
+
+Before capturing, you can optionally:
+- `warm_simulator` — pre-boot the simulator, grant permissions, set canonical status bar (9:41)
+- `seed_defaults` — pre-populate UserDefaults with demo data (see `prepare-app` prompt, Option B)
+- `interact_simulator` — scroll or tap to show specific content before capture
+
+These are optional and only needed when the app requires pre-populated state or specific UI position.
+
+---
+
 ## Step 7 — Capture screenshots from simulator
 
-Call `capture_screenshots` to launch the app in the simulator for each mode and capture screenshots with device bezels.
+Call `capture_screenshots` to launch the app in the simulator for each mode and capture clean framebuffer screenshots.
 
 The tool uses:
 - `xcrun simctl boot` to start the simulator
 - `xcrun simctl launch --screenshot-N` to trigger each mode
-- `screencapture -o -l <window_id>` to capture with pixel-perfect Apple bezels
+- `xcrun simctl io booted screenshot` to capture the clean framebuffer (no device bezels)
+
+Device frames are added during the compose step (Step 8) via the Typst template, not during capture.
 
 Verify each capture looks correct — the app should show the expected screen with demo data.
 
@@ -502,7 +589,24 @@ Call `compose_screenshots` to render all final images via the Typst template.
 This combines:
 - Background (from template)
 - Caption text (from saved captions)
-- Screenshot image (from captures, with device bezel)
+- Screenshot image (from captures, injected as virtual file)
+
+The Typst template receives these `sys.inputs`:
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `caption_title` | string | Main caption text |
+| `caption_subtitle` | string (opt) | Supporting subtitle |
+| `keyword` | string (opt) | Target ASO keyword |
+| `bg_color` | string (opt) | First background color as OKLCH |
+| `bg_gradient` | string (opt) | All background colors, comma-separated |
+| `device_width` | string | Target device width in pixels |
+| `device_height` | string | Target device height in pixels |
+| `locale` | string | Locale code (e.g. "en-US") |
+| `text_direction` | string | "ltr" or "rtl" |
+| `screenshot_path` | string (opt) | "/screenshot.png" when capture exists |
+
+When `screenshot_path` is present, the captured screenshot is available as a virtual file at `/screenshot.png`. Access it via `image("/screenshot.png")` in the template — NOT through `sys.inputs`. The `screenshot_path` input only signals whether the file exists.
 
 Output goes to `fastlane/screenshots/{{locale}}/` in the format expected by `fastlane deliver`.
 
@@ -536,6 +640,9 @@ When all screenshots are verified, call `run_deliver` to upload to App Store Con
 | 4 | `save_captions` | Write en-US captions |
 | 5 | `get_locale_keywords` + `save_captions` | Translate + save per locale |
 | 6 | `validate_layout` | Check all templates render |
+| opt | `warm_simulator` | Pre-boot, permissions, status bar (9:41) |
+| opt | `seed_defaults` | Pre-populate UserDefaults with demo data |
+| opt | `interact_simulator` | Scroll or tap to show specific content |
 | 7 | `capture_screenshots` | Capture from simulator |
 | 8 | `compose_screenshots` | Render final PNGs via Typst |
 | 9 | (manual review) | Inspect + fix + re-compose |
@@ -589,6 +696,20 @@ mod tests {
         let content = prepare_app_content("com.test", 5);
         assert!(content.contains("--screenshot-"));
         assert!(content.contains("ProcessInfo"));
+    }
+
+    #[test]
+    fn prepare_app_references_seed_defaults() {
+        let content = prepare_app_content("com.test", 5);
+        assert!(content.contains("seed_defaults"));
+        assert!(content.contains("UserDefaults"));
+    }
+
+    #[test]
+    fn prepare_app_references_mechanism_note() {
+        let content = prepare_app_content("com.test", 5);
+        assert!(content.contains("launch argument"));
+        assert!(content.contains("SIMCTL_CHILD_"));
     }
 
     #[test]
@@ -711,6 +832,9 @@ mod tests {
             "save_captions",
             "get_locale_keywords",
             "validate_layout",
+            "warm_simulator",
+            "seed_defaults",
+            "interact_simulator",
             "capture_screenshots",
             "compose_screenshots",
             "run_deliver",

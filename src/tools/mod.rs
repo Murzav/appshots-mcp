@@ -4,10 +4,13 @@ pub mod capture;
 pub mod deliver;
 pub mod design;
 pub mod glossary;
+pub mod interact;
 pub mod plan;
 pub mod render;
 pub mod scan;
+pub mod seed;
 pub mod validate;
+pub mod warm;
 
 use std::collections::HashMap;
 use std::path::Path;

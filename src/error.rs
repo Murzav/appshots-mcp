@@ -24,11 +24,29 @@ pub enum AppShotsError {
     #[error("template compile error: {0}")]
     TemplateCompileError(String),
 
-    #[error("capture error: {0}")]
-    CaptureError(String),
+    #[error("screenshot capture failed for {device}: {detail}")]
+    CaptureFailed { device: String, detail: String },
 
-    #[error("simulator error: {0}")]
-    SimulatorError(String),
+    #[error("screenshot capture timed out after {timeout_secs}s")]
+    CaptureTimeout { timeout_secs: u64 },
+
+    #[error("no booted simulator found — run `xcrun simctl boot \"{device}\"` first")]
+    SimulatorNotBooted { device: String },
+
+    #[error("simctl {command} failed: {detail}")]
+    SimctlFailed {
+        command: &'static str,
+        detail: String,
+    },
+
+    #[error("simctl {command} timed out after {timeout_secs}s — is Simulator.app responding?")]
+    SimctlTimeout {
+        command: &'static str,
+        timeout_secs: u64,
+    },
+
+    #[error("simulator interaction failed ({action}): {detail}")]
+    InteractionFailed { action: String, detail: String },
 
     #[error("locale not found: {0}")]
     LocaleNotFound(String),
@@ -78,7 +96,8 @@ impl From<AppShotsError> for rmcp::model::ErrorData {
             | AppShotsError::JsonParse(_)
             | AppShotsError::NoActiveProject
             | AppShotsError::InvalidPath { .. }
-            | AppShotsError::FileTooLarge { .. } => rmcp::model::ErrorCode::INVALID_PARAMS,
+            | AppShotsError::FileTooLarge { .. }
+            | AppShotsError::SimulatorNotBooted { .. } => rmcp::model::ErrorCode::INVALID_PARAMS,
             _ => rmcp::model::ErrorCode::INTERNAL_ERROR,
         };
         rmcp::model::ErrorData {
@@ -158,6 +177,9 @@ mod tests {
                 size_mb: 500,
                 max_mb: 200,
             },
+            AppShotsError::SimulatorNotBooted {
+                device: "iPhone 17 Pro Max".into(),
+            },
         ];
         for err in user_errors {
             let data: rmcp::model::ErrorData = err.into();
@@ -176,8 +198,23 @@ mod tests {
             AppShotsError::Io(std::io::Error::new(std::io::ErrorKind::Other, "io")),
             AppShotsError::TemplateCompileError("compile".into()),
             AppShotsError::RenderError("render".into()),
-            AppShotsError::CaptureError("capture".into()),
-            AppShotsError::SimulatorError("sim".into()),
+            AppShotsError::CaptureFailed {
+                device: "iPhone".into(),
+                detail: "capture".into(),
+            },
+            AppShotsError::CaptureTimeout { timeout_secs: 60 },
+            AppShotsError::SimctlFailed {
+                command: "launch",
+                detail: "sim".into(),
+            },
+            AppShotsError::SimctlTimeout {
+                command: "launch",
+                timeout_secs: 60,
+            },
+            AppShotsError::InteractionFailed {
+                action: "scroll".into(),
+                detail: "failed".into(),
+            },
             AppShotsError::DeliverError("deliver".into()),
             AppShotsError::FileLocked {
                 path: PathBuf::from("/locked"),

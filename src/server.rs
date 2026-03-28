@@ -64,21 +64,46 @@ Use prompts to kick off major workflows. Three prompts available:
   Step 6  TRANSLATE       get_locale_keywords              Get locale keywords
                           + save_captions (per locale)     Write translated captions
   Step 7  VALIDATE        validate_layout                  Check templates compile
+  (opt)   WARM            warm_simulator                   Pre-boot + status bar + permissions
+  (opt)   SEED            seed_defaults                    Seed mock UserDefaults data
   Step 8  CAPTURE         capture_screenshots              Capture from iOS simulator
+  (opt)   INTERACT        interact_simulator               Scroll/tap before next capture
   Step 9  COMPOSE         compose_screenshots              Render final PNGs via Typst
   Step 10 DELIVER         run_deliver                      Upload via fastlane deliver
 
 === TOOLS REFERENCE ===
 
---- Capture (2 tools) ---
+--- Capture & Setup (5 tools) ---
 
   list_simulators
     List available iOS simulators with name, UDID, state, runtime.
     No parameters.
     Use: find the right device name/UDID before capturing.
 
+  warm_simulator
+    Pre-boot simulator, grant permissions, set status bar to Apple canonical (9:41).
+    Params: udid, bundle_id (opt), appearance (opt: \"light\"/\"dark\")
+    Use: warm_simulator(udid: \"ABC-123\", bundle_id: \"com.app\") before capture.
+    Does: boot → grant all permissions → status bar (9:41, full battery/signal) → appearance.
+
+  seed_defaults
+    Seed UserDefaults in simulator via plist import.
+    MUST run AFTER app install but BEFORE app launch.
+    Params: bundle_id, data (key-value JSON object)
+    Use: seed_defaults(bundle_id: \"com.app\", data: {\"streak\": 7, \"isPro\": true})
+    Supports: String, Int, Float, Bool, Array, Dict, base64-encoded Data.
+    NOTE: Swift Date = Double (secondsSinceReferenceDate from 2001-01-01).
+
+  interact_simulator
+    Scroll or tap in iOS Simulator via CGEvent mouse drag simulation.
+    Requires macOS Accessibility permission and Simulator must be frontmost.
+    Params: action (\"scroll\"/\"tap\"), x, y, dx (opt), dy (opt), delay_ms (opt)
+    Use: interact_simulator(action: \"scroll\", x: 200, y: 400, dy: -300) to scroll down.
+    Use: interact_simulator(action: \"tap\", x: 200, y: 400) to tap a button.
+
   capture_screenshots
-    Capture screenshots from iOS simulator with native device bezels.
+    Capture clean screenshots from iOS simulator framebuffer.
+    Device frames are added during the compose step, not during capture.
     Params: bundle_id, device, modes (opt), locales (opt), delay_ms (opt)
     Use: capture_screenshots(bundle_id: \"com.app\", device: \"iPhone 17 Pro Max\")
 
@@ -215,6 +240,12 @@ Use prompts to kick off major workflows. Three prompts available:
 
   MAX 10 SCREENSHOTS PER LOCALE
 
+  SCREENSHOT COMPOSITION
+    capture_screenshots produces clean framebuffer images (no device bezels).
+    Device frames are added in the Typst template during compose_screenshots.
+    Templates access the capture via image(\"/screenshot.png\") virtual file.
+    Check sys.inputs.at(\"screenshot_path\", default: none) for availability.
+
 === COMMON WORKFLOWS ===
 
   Fix one screenshot:
@@ -236,6 +267,19 @@ Use prompts to kick off major workflows. Three prompts available:
   Re-capture after app change:
     capture_screenshots(bundle_id, device, modes: [4])
 
+  Pre-warm simulator:
+    list_simulators -> warm_simulator(udid, bundle_id) -> capture_screenshots(...)
+
+  Capture scrolled content:
+    warm_simulator(udid) -> capture first modes ->
+    interact_simulator(action: \"scroll\", x: 200, y: 400, dy: -300) ->
+    capture_screenshots(modes: [scrolled_mode])
+
+  Seed mock data before capture:
+    warm_simulator(udid, bundle_id) ->
+    seed_defaults(bundle_id, data: {\"isPro\": true, \"streak\": 7}) ->
+    capture_screenshots(...)
+
 === DIRECTORY STRUCTURE ===
 
   fastlane/metadata/{locale}/        keywords.txt, name.txt, subtitle.txt
@@ -244,8 +288,9 @@ Use prompts to kick off major workflows. Three prompts available:
   appshots/template.typ              single shared Typst template
   appshots/templates/                per-screen Typst templates
   appshots/fonts/                    custom fonts
-  appshots/captures/{device}/{locale}/  simulator captures with bezels
+  appshots/captures/{device}/{locale}/  simulator captures
   appshots/previews/                 design iteration previews
+  appshots/.seed-defaults.plist      temporary plist for defaults import
   glossary.json                      shared glossary (also used by xcstrings-mcp)
 ";
 use crate::model::color::OklchColor;
@@ -382,6 +427,40 @@ pub struct CaptureScreenshotsParams {
     pub locales: Option<Vec<String>>,
     /// Delay in ms between launch and capture
     pub delay_ms: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct InteractSimulatorParams {
+    /// Action: "scroll" or "tap"
+    pub action: String,
+    /// X coordinate (screen pixels). For tap: required. For scroll: optional start position.
+    pub x: Option<f64>,
+    /// Y coordinate (screen pixels). For tap: required. For scroll: optional start position.
+    pub y: Option<f64>,
+    /// Horizontal scroll delta in pixels.
+    pub dx: Option<f64>,
+    /// Vertical scroll delta in pixels (positive = scroll content down).
+    pub dy: Option<f64>,
+    /// Delay in ms after action for UI to settle (default: 500).
+    pub delay_ms: Option<u64>,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct SeedDefaultsParams {
+    /// App bundle ID
+    pub bundle_id: String,
+    /// Key-value data to seed into UserDefaults
+    pub data: indexmap::IndexMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, JsonSchema, Default)]
+pub struct WarmSimulatorParams {
+    /// Simulator UDID
+    pub udid: String,
+    /// App bundle ID (optional, for granting permissions)
+    pub bundle_id: Option<String>,
+    /// Appearance: "light" or "dark" (optional)
+    pub appearance: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -754,6 +833,79 @@ impl AppShotsMcpServer {
     }
 
     #[tool(
+        name = "interact_simulator",
+        description = "Interact with iOS Simulator: scroll or tap. Requires macOS Accessibility permission. Simulator must be the frontmost window. Use before capture_screenshots to scroll content into view."
+    )]
+    async fn interact_simulator(
+        &self,
+        Parameters(params): Parameters<InteractSimulatorParams>,
+    ) -> Result<String, String> {
+        match crate::tools::interact::handle_interact_simulator(
+            &params.action,
+            params.x,
+            params.y,
+            params.dx,
+            params.dy,
+            params.delay_ms.unwrap_or(500),
+        )
+        .await
+        {
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|e| e.to_string()),
+            Err(e) => {
+                error!(error = %e, "interact_simulator failed");
+                Err(e.to_string())
+            }
+        }
+    }
+
+    #[tool(
+        name = "seed_defaults",
+        description = "Seed UserDefaults in simulator via plist import. Must run AFTER app install but BEFORE app launch. Supports String, Int, Float, Bool, Array, Dict, base64-encoded Data."
+    )]
+    async fn seed_defaults(
+        &self,
+        Parameters(params): Parameters<SeedDefaultsParams>,
+    ) -> Result<String, String> {
+        match crate::tools::seed::handle_seed_defaults(
+            self.store.as_ref(),
+            &self.project_dir,
+            &params.bundle_id,
+            params.data,
+        )
+        .await
+        {
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|e| e.to_string()),
+            Err(e) => {
+                error!(error = %e, "seed_defaults failed");
+                Err(e.to_string())
+            }
+        }
+    }
+
+    #[tool(
+        name = "warm_simulator",
+        description = "Pre-boot simulator, grant permissions, set status bar to Apple canonical (9:41, full battery/signal), and optionally set appearance (light/dark)"
+    )]
+    async fn warm_simulator(
+        &self,
+        Parameters(params): Parameters<WarmSimulatorParams>,
+    ) -> Result<String, String> {
+        match crate::tools::warm::handle_warm_simulator(
+            &params.udid,
+            params.bundle_id.as_deref(),
+            params.appearance.as_deref(),
+        )
+        .await
+        {
+            Ok(result) => serde_json::to_string_pretty(&result).map_err(|e| e.to_string()),
+            Err(e) => {
+                error!(error = %e, "warm_simulator failed");
+                Err(e.to_string())
+            }
+        }
+    }
+
+    #[tool(
         name = "get_glossary",
         description = "Get glossary entries, optionally filtered by locale pair or substring"
     )]
@@ -1103,6 +1255,9 @@ mod tests {
             "run_deliver",
             "get_glossary",
             "update_glossary",
+            "seed_defaults",
+            "warm_simulator",
+            "interact_simulator",
         ];
         for tool in &tools {
             assert!(
@@ -1150,7 +1305,10 @@ mod tests {
         assert!(names.contains(&"save_template"));
         assert!(names.contains(&"get_template"));
         assert!(names.contains(&"suggest_font"));
-        assert_eq!(tools.len(), 21);
+        assert!(names.contains(&"interact_simulator"));
+        assert!(names.contains(&"seed_defaults"));
+        assert!(names.contains(&"warm_simulator"));
+        assert_eq!(tools.len(), 24);
     }
 
     #[test]
@@ -1734,5 +1892,48 @@ mod tests {
         let params = ReviewCaptionsParams::default();
         assert!(params.locale.is_none());
         assert!(params.modes.is_none());
+    }
+
+    #[test]
+    fn seed_defaults_params_from_json() {
+        let json = r#"{"bundle_id": "com.app", "data": {"streak": 7, "isPro": true}}"#;
+        let params: SeedDefaultsParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.bundle_id, "com.app");
+        assert_eq!(params.data.len(), 2);
+        assert_eq!(params.data["streak"], 7);
+        assert_eq!(params.data["isPro"], true);
+    }
+
+    #[test]
+    fn seed_defaults_params_defaults() {
+        let params = SeedDefaultsParams::default();
+        assert!(params.bundle_id.is_empty());
+        assert!(params.data.is_empty());
+    }
+
+    #[test]
+    fn warm_simulator_params_from_json() {
+        let json = r#"{"udid": "ABC-123", "bundle_id": "com.app", "appearance": "dark"}"#;
+        let params: WarmSimulatorParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.udid, "ABC-123");
+        assert_eq!(params.bundle_id, Some("com.app".into()));
+        assert_eq!(params.appearance, Some("dark".into()));
+    }
+
+    #[test]
+    fn warm_simulator_params_defaults() {
+        let params = WarmSimulatorParams::default();
+        assert!(params.udid.is_empty());
+        assert!(params.bundle_id.is_none());
+        assert!(params.appearance.is_none());
+    }
+
+    #[test]
+    fn warm_simulator_params_minimal() {
+        let json = r#"{"udid": "XYZ"}"#;
+        let params: WarmSimulatorParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.udid, "XYZ");
+        assert!(params.bundle_id.is_none());
+        assert!(params.appearance.is_none());
     }
 }

@@ -38,10 +38,10 @@ pub(crate) fn build_launch_command(bundle_id: &str, mode: u8) -> Command {
     cmd
 }
 
-/// Build the screencapture command.
-pub(crate) fn build_capture_command(window_id: u32, output_path: &str) -> Command {
-    let mut cmd = Command::new("screencapture");
-    cmd.args(["-o", "-l", &window_id.to_string(), output_path]);
+/// Build the simctl screenshot command for the booted simulator.
+pub(crate) fn build_capture_command(output_path: &str) -> Command {
+    let mut cmd = Command::new("xcrun");
+    cmd.args(["simctl", "io", "booted", "screenshot", output_path]);
     cmd
 }
 
@@ -78,16 +78,21 @@ pub(crate) async fn handle_capture_screenshots(
             let mut launch_cmd = build_launch_command(bundle_id, mode);
             let launch_output = timeout(COMMAND_TIMEOUT, launch_cmd.output())
                 .await
-                .map_err(|_| {
-                    AppShotsError::SimulatorError("simctl launch timed out after 60s".into())
+                .map_err(|_| AppShotsError::SimctlTimeout {
+                    command: "launch",
+                    timeout_secs: COMMAND_TIMEOUT.as_secs(),
                 })?
-                .map_err(|e| AppShotsError::SimulatorError(format!("failed to launch app: {e}")))?;
+                .map_err(|e| AppShotsError::SimctlFailed {
+                    command: "launch",
+                    detail: e.to_string(),
+                })?;
 
             if !launch_output.status.success() {
                 let stderr = String::from_utf8_lossy(&launch_output.stderr);
-                return Err(AppShotsError::SimulatorError(format!(
-                    "simctl launch failed: {stderr}"
-                )));
+                return Err(AppShotsError::SimctlFailed {
+                    command: "launch",
+                    detail: stderr.into_owned(),
+                });
             }
 
             // Wait for the app to settle
@@ -95,27 +100,28 @@ pub(crate) async fn handle_capture_screenshots(
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             }
 
-            // Find simulator window ID
-            let window_id = find_simulator_window_id().await?;
-
-            // Capture screenshot
+            // Capture screenshot via simctl io
             let output_filename = format!("mode-{mode}.png");
             let output_path = locale_dir.join(&output_filename);
             let output_path_str = output_path.to_string_lossy().to_string();
 
-            let mut capture_cmd = build_capture_command(window_id, &output_path_str);
+            let mut capture_cmd = build_capture_command(&output_path_str);
             let capture_output = timeout(COMMAND_TIMEOUT, capture_cmd.output())
                 .await
-                .map_err(|_| {
-                    AppShotsError::CaptureError("screencapture timed out after 60s".into())
+                .map_err(|_| AppShotsError::CaptureTimeout {
+                    timeout_secs: COMMAND_TIMEOUT.as_secs(),
                 })?
-                .map_err(|e| AppShotsError::CaptureError(format!("screencapture failed: {e}")))?;
+                .map_err(|e| AppShotsError::CaptureFailed {
+                    device: device.to_owned(),
+                    detail: e.to_string(),
+                })?;
 
             if !capture_output.status.success() {
                 let stderr = String::from_utf8_lossy(&capture_output.stderr);
-                return Err(AppShotsError::CaptureError(format!(
-                    "screencapture failed: {stderr}"
-                )));
+                return Err(AppShotsError::CaptureFailed {
+                    device: device.to_owned(),
+                    detail: stderr.into_owned(),
+                });
             }
 
             captures.push(CaptureInfo {
@@ -131,44 +137,6 @@ pub(crate) async fn handle_capture_screenshots(
         captured: captures.len(),
         captures,
     })
-}
-
-/// Find the Simulator.app window ID via `xcrun simctl list windows`.
-async fn find_simulator_window_id() -> Result<u32, AppShotsError> {
-    let output = timeout(
-        COMMAND_TIMEOUT,
-        Command::new("xcrun")
-            .args(["simctl", "list", "windows", "booted"])
-            .output(),
-    )
-    .await
-    .map_err(|_| AppShotsError::SimulatorError("simctl list windows timed out after 60s".into()))?
-    .map_err(|e| AppShotsError::SimulatorError(format!("failed to list windows: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppShotsError::SimulatorError(format!(
-            "simctl list windows failed: {stderr}"
-        )));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse window ID from output — format varies, but typically includes a numeric window ID
-    // Try to find a line with a window ID
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(id) = trimmed
-            .split_whitespace()
-            .find_map(|token| token.parse::<u32>().ok())
-        {
-            return Ok(id);
-        }
-    }
-
-    Err(AppShotsError::SimulatorError(
-        "no simulator window found".into(),
-    ))
 }
 
 #[derive(Debug, Serialize)]
@@ -188,14 +156,21 @@ pub(crate) async fn handle_list_simulators() -> Result<Vec<SimulatorInfo>, AppSh
             .output(),
     )
     .await
-    .map_err(|_| AppShotsError::SimulatorError("simctl list devices timed out after 60s".into()))?
-    .map_err(|e| AppShotsError::SimulatorError(format!("failed to list simulators: {e}")))?;
+    .map_err(|_| AppShotsError::SimctlTimeout {
+        command: "list devices",
+        timeout_secs: COMMAND_TIMEOUT.as_secs(),
+    })?
+    .map_err(|e| AppShotsError::SimctlFailed {
+        command: "list devices",
+        detail: e.to_string(),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppShotsError::SimulatorError(format!(
-            "simctl list devices failed: {stderr}"
-        )));
+        return Err(AppShotsError::SimctlFailed {
+            command: "list devices",
+            detail: stderr.into_owned(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -280,17 +255,18 @@ mod tests {
 
     #[test]
     fn build_capture_command_has_correct_args() {
-        let cmd = build_capture_command(12345, "/output/screenshot.png");
+        let cmd = build_capture_command("/output/screenshot.png");
         let prog = cmd.as_std().get_program();
-        assert_eq!(prog, OsStr::new("screencapture"));
+        assert_eq!(prog, OsStr::new("xcrun"));
 
         let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
         assert_eq!(
             args,
             vec![
-                OsStr::new("-o"),
-                OsStr::new("-l"),
-                OsStr::new("12345"),
+                OsStr::new("simctl"),
+                OsStr::new("io"),
+                OsStr::new("booted"),
+                OsStr::new("screenshot"),
                 OsStr::new("/output/screenshot.png"),
             ]
         );
@@ -303,15 +279,6 @@ mod tests {
             let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
             let expected = format!("--screenshot-{mode}");
             assert_eq!(args[4], OsStr::new(&expected));
-        }
-    }
-
-    #[test]
-    fn build_capture_command_different_window_ids() {
-        for wid in [1u32, 999, 65535] {
-            let cmd = build_capture_command(wid, "/tmp/out.png");
-            let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
-            assert_eq!(args[2], OsStr::new(&wid.to_string()));
         }
     }
 
@@ -422,5 +389,105 @@ mod tests {
         assert_eq!(json["udid"], "ABC-123");
         assert_eq!(json["state"], "Booted");
         assert_eq!(json["runtime"], "iOS.18.0");
+    }
+
+    #[test]
+    fn parse_simctl_devices_with_missing_fields() {
+        // Devices with missing optional fields should still parse
+        let json = r#"{
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                    {"name": "iPhone 17", "udid": "AAA", "state": "Shutdown"},
+                    {"udid": "BBB", "state": "Booted"}
+                ]
+            }
+        }"#;
+        let result = parse_simctl_devices(json).unwrap();
+        assert_eq!(result.len(), 2);
+        // Missing name defaults to ""
+        let no_name = result.iter().find(|s| s.udid == "BBB").unwrap();
+        assert_eq!(no_name.name, "");
+    }
+
+    #[test]
+    fn parse_simctl_devices_multiple_runtimes_sorted() {
+        let json = r#"{
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": [
+                    {"name": "iPhone 17", "udid": "A", "state": "Booted"}
+                ],
+                "com.apple.CoreSimulator.SimRuntime.iOS-17-5": [
+                    {"name": "iPhone 17", "udid": "B", "state": "Shutdown"}
+                ]
+            }
+        }"#;
+        let result = parse_simctl_devices(json).unwrap();
+        assert_eq!(result.len(), 2);
+        // Same name, sorted by runtime
+        assert_eq!(result[0].runtime, "iOS.17.5");
+        assert_eq!(result[1].runtime, "iOS.18.0");
+    }
+
+    #[test]
+    fn parse_simctl_devices_non_array_runtime_skipped() {
+        let json = r#"{
+            "devices": {
+                "com.apple.CoreSimulator.SimRuntime.iOS-18-0": "not an array",
+                "com.apple.CoreSimulator.SimRuntime.iOS-17-5": [
+                    {"name": "iPad", "udid": "C", "state": "Shutdown"}
+                ]
+            }
+        }"#;
+        let result = parse_simctl_devices(json).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "iPad");
+    }
+
+    #[test]
+    fn build_capture_command_with_spaces_in_path() {
+        let cmd = build_capture_command("/Users/test user/screenshots/mode 1.png");
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(
+            args[4],
+            OsStr::new("/Users/test user/screenshots/mode 1.png")
+        );
+    }
+
+    #[test]
+    fn build_launch_command_mode_boundaries() {
+        // Mode 0 (unusual but valid)
+        let cmd = build_launch_command("com.test", 0);
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(args[4], OsStr::new("--screenshot-0"));
+
+        // Mode 255 (u8 max)
+        let cmd = build_launch_command("com.test", 255);
+        let args: Vec<&OsStr> = cmd.as_std().get_args().collect();
+        assert_eq!(args[4], OsStr::new("--screenshot-255"));
+    }
+
+    #[test]
+    fn capture_info_serialization_with_special_chars() {
+        let info = CaptureInfo {
+            mode: 3,
+            locale: "zh-Hans".to_owned(),
+            device: "iPad 13\"".to_owned(),
+            output_path: "/tmp/appshots/captures/iPad 13\"/zh-Hans/mode-3.png".to_owned(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["mode"], 3);
+        assert_eq!(json["locale"], "zh-Hans");
+        assert_eq!(json["device"], "iPad 13\"");
+    }
+
+    #[test]
+    fn capture_result_empty() {
+        let result = CaptureResult {
+            captured: 0,
+            captures: vec![],
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["captured"], 0);
+        assert!(json["captures"].as_array().unwrap().is_empty());
     }
 }

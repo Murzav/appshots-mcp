@@ -24,8 +24,10 @@ AI logic lives in Claude Code; the server provides tools, rendering, and validat
 
 ## Features
 
-- **21 MCP tools** for the complete screenshot pipeline
+- **24 MCP tools** for the complete screenshot pipeline
 - **3 MCP prompts** guiding app preparation, template design, and batch generation
+- **Simulator state management** — pre-warm, seed UserDefaults, scroll/tap before capture
+- **Clean capture + Typst compositing** — framebuffer screenshots with device frames added in templates
 - **Typst rendering** — native RTL/CJK support, exact layout, sub-second renders
 - **OKLCH color space** exclusively — perceptually uniform, no hex/RGB
 - **39 ASO locales** with fallback chains
@@ -95,18 +97,22 @@ claude mcp add appshots-mcp -- appshots-mcp --project-dir /path/to/your/app
 
 ```
 scan_project → analyze_keywords → plan_screens → save_captions (en-US)
-→ translate captions (38 locales) → validate_layout → capture_screenshots
+→ translate captions (38 locales) → validate_layout
+→ warm_simulator → seed_defaults → capture_screenshots
 → compose_screenshots → run_deliver
 ```
 
 ### Tools
 
-#### Capture
+#### Capture & Setup
 
 | Tool | Description |
 |------|-------------|
 | `list_simulators` | List available iOS simulators (UDID, runtime, state) |
-| `capture_screenshots` | Capture app screens from simulator with device bezels |
+| `warm_simulator` | Pre-boot simulator, grant permissions, set Apple canonical status bar (9:41) |
+| `seed_defaults` | Seed UserDefaults via plist import (run after install, before launch) |
+| `interact_simulator` | Scroll or tap in iOS Simulator via CGEvent mouse drag simulation |
+| `capture_screenshots` | Capture clean screenshots from simulator framebuffer (no device bezels) |
 
 #### Discovery & Analysis
 
@@ -151,9 +157,9 @@ scan_project → analyze_keywords → plan_screens → save_captions (en-US)
 
 | Prompt | Description |
 |--------|-------------|
-| `prepare-app` | Guide: create ScreenshotMode enum + ScreenshotDataProvider in Swift |
-| `design-template` | Guide: design Typst template with OKLCH colors, auto-scaling text, RTL support |
-| `generate-screenshots` | Guide: full 10-step pipeline from scan to deliver |
+| `prepare-app` | Guide: create ScreenshotMode enum + ScreenshotDataProvider in Swift; documents `defaults import` for seeding mock data |
+| `design-template` | Guide: design Typst template with OKLCH colors, auto-scaling text, RTL support; includes device frame compositing approaches |
+| `generate-screenshots` | Guide: full 10-step pipeline from scan to deliver; covers warm/seed/interact prep steps and compose internals |
 
 ### Granular Regeneration
 
@@ -172,6 +178,16 @@ All rendering tools accept optional `modes` and `locales` filters. Omitting = pr
 - **Locale Fallback**: es-MX->es-ES, fr-CA->fr-FR, en-AU/CA/GB->en-US, pt-PT->pt-BR, zh-Hant->zh-Hans
 - **Required Sizes**: iPhone 6.9" (1320x2868), iPad 13" (2064x2752). Max 10 per locale.
 
+## How Screenshot Modes Work
+
+Each app screen is assigned a numeric **mode** (1-10). The app's `ScreenshotMode` Swift enum maps modes to specific UI states:
+
+1. The app is launched with `xcrun simctl launch --screenshot-N <udid> <bundle_id>` where N is the mode number
+2. `ScreenshotDataProvider` in the app checks `ProcessInfo.processInfo.arguments` for `--screenshot-N` and configures mock data accordingly
+3. For complex state (e.g., streak counts, pro status), use `seed_defaults` to write UserDefaults **before** launching the app
+4. `capture_screenshots` captures a clean framebuffer image per mode — no device bezels
+5. `compose_screenshots` renders the final PNG via Typst, overlaying captions and optionally adding device frames
+
 ## Project Directory Structure
 
 ```
@@ -184,16 +200,28 @@ project-root/
 │   ├── template.typ          ← single template
 │   ├── templates/            ← per-screen templates
 │   ├── fonts/                ← custom fonts (.ttf, .otf, .woff2)
-│   ├── captures/             ← simulator captures with bezels
-│   └── previews/             ← design iteration previews
+│   ├── captures/             ← simulator captures (clean framebuffer)
+│   ├── previews/             ← design iteration previews
+│   └── .seed-defaults.plist  ← temporary plist for defaults import
+├── examples/                 ← reference Typst templates
 └── glossary.json             ← shared with xcstrings-mcp
 ```
+
+## Device Frame Compositing
+
+`capture_screenshots` produces clean framebuffer images without device bezels. Device frames are added during `compose_screenshots` via Typst templates. Three approaches:
+
+1. **Raw screenshot** — no frame, just the capture with captions overlay
+2. **Rounded card** — Typst `rect(radius: ...)` with `clip: true` to simulate device corners
+3. **PNG overlay** — place a transparent device frame PNG on top of the screenshot (pixel-perfect Apple bezels)
+
+See `examples/template-with-frame.typ` for a reference template demonstrating approach #2 with RTL support, auto-scaling text, and OKLCH colors.
 
 ## Architecture
 
 ```
 main.rs     → CLI (clap), tokio current_thread, stdio transport
-server.rs   → #[tool_router] (21 tools) + #[prompt_router] (3 prompts)
+server.rs   → #[tool_router] (24 tools) + #[prompt_router] (3 prompts)
 tools/      → capture, scan, analyze, plan, captions, design, render,
               deliver, validate, glossary — all I/O via FileStore trait
 service/    → metadata_parser, locale, keyword_matcher, font_resolver,

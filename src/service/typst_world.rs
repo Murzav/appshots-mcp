@@ -192,7 +192,6 @@ mod tests {
     use typst::foundations::{IntoValue, Str};
 
     use super::*;
-    use crate::io::memory::MemoryStore;
 
     fn empty_inputs() -> Dict {
         Dict::new()
