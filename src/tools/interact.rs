@@ -66,6 +66,7 @@ pub(crate) async fn handle_interact_simulator(
 ///
 /// The user's `dy` means "scroll content down by dy pixels", which translates
 /// to dragging upward (negative screen Y direction). We negate dy for drag.
+#[cfg(target_os = "macos")]
 fn execute_scroll(dx: f64, dy: f64, start_x: f64, start_y: f64) -> Result<(), AppShotsError> {
     use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -127,7 +128,16 @@ fn execute_scroll(dx: f64, dy: f64, start_x: f64, start_y: f64) -> Result<(), Ap
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
+fn execute_scroll(_dx: f64, _dy: f64, _start_x: f64, _start_y: f64) -> Result<(), AppShotsError> {
+    Err(AppShotsError::InteractionFailed {
+        action: "scroll".into(),
+        detail: "simulator interaction requires macOS (CGEvent API)".into(),
+    })
+}
+
 /// Simulate a tap at the given screen coordinates.
+#[cfg(target_os = "macos")]
 fn execute_tap(x: f64, y: f64) -> Result<(), AppShotsError> {
     use core_graphics::event::{CGEvent, CGEventType, CGMouseButton};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -164,6 +174,14 @@ fn execute_tap(x: f64, y: f64) -> Result<(), AppShotsError> {
     up.post(core_graphics::event::CGEventTapLocation::HID);
 
     Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn execute_tap(_x: f64, _y: f64) -> Result<(), AppShotsError> {
+    Err(AppShotsError::InteractionFailed {
+        action: "tap".into(),
+        detail: "simulator interaction requires macOS (CGEvent API)".into(),
+    })
 }
 
 #[cfg(test)]
@@ -231,10 +249,11 @@ mod tests {
         // Either succeeds (has Accessibility) or fails at CGEvent creation
         if let Err(e) = result {
             assert!(matches!(e, AppShotsError::InteractionFailed { .. }));
-            // Should mention CGEventSource, not parameter validation
+            // Should mention CGEventSource or macOS, not parameter validation
+            let msg = e.to_string();
             assert!(
-                e.to_string().contains("CGEventSource") || e.to_string().contains("event"),
-                "expected CGEvent error, got: {e}"
+                msg.contains("CGEventSource") || msg.contains("event") || msg.contains("macOS"),
+                "expected CGEvent/macOS error, got: {msg}"
             );
         }
     }
@@ -247,9 +266,10 @@ mod tests {
         if let Err(e) = result {
             assert!(matches!(e, AppShotsError::InteractionFailed { .. }));
             // Should fail at CGEvent, not at parameter validation
+            let msg = e.to_string();
             assert!(
-                e.to_string().contains("CGEventSource") || e.to_string().contains("event"),
-                "expected CGEvent error, got: {e}"
+                msg.contains("CGEventSource") || msg.contains("event") || msg.contains("macOS"),
+                "expected CGEvent/macOS error, got: {msg}"
             );
         }
     }
